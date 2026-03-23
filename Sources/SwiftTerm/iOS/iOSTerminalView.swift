@@ -294,9 +294,11 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
           
     func setup()
     {
-        showsHorizontalScrollIndicator = true
+        delegate = self
+        showsVerticalScrollIndicator = true
+        showsHorizontalScrollIndicator = false
         indicatorStyle = .white
-        
+
         setupKeyboardButtonColors()
         setupDisplayUpdates ();
         setupOptions ()
@@ -1336,10 +1338,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         let displayBuffer = terminal.displayBuffer
         contentSize = CGSize (width: CGFloat (displayBuffer.cols) * cellDimension.width,
                               height: CGFloat (displayBuffer.lines.count) * cellDimension.height)
-        //contentOffset = CGPoint (x: 0, y: CGFloat (displayBuffer.lines.count-displayBuffer.rows)*cellDimension.height)
-        contentOffset = CGPoint (x: 0, y: CGFloat (displayBuffer.lines.count-displayBuffer.rows)*cellDimension.height)
-        //Xscroller.doubleValue = scrollPosition
-        //Xscroller.knobProportion = scrollThumbsize
+        // Sync contentOffset with yDisp instead of always snapping to bottom.
+        // When the user is scrolled up viewing history, yDisp stays put (Terminal
+        // respects userScrolling) so contentOffset also stays put.
+        let targetY = CGFloat(displayBuffer.yDisp) * cellDimension.height
+        if !isSyncingYDispFromScroll && abs(contentOffset.y - targetY) > 0.5 {
+            contentOffset = CGPoint(x: 0, y: targetY)
+        }
     }
 
 #if canImport(MetalKit)
@@ -1360,8 +1365,56 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         return firstRow...lastRow
     }
 #endif
-    
+
     var userScrolling = false
+    private var isSyncingYDispFromScroll = false
+
+    // MARK: - UIScrollViewDelegate
+
+    public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        userScrolling = true
+        terminal.userScrolling = true
+    }
+
+    public func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        guard !isSyncingYDispFromScroll else { return }
+        guard cellDimension.height > 0 else { return }
+
+        let displayBuffer = terminal.displayBuffer
+        let maxRow = displayBuffer.lines.count - displayBuffer.rows
+        guard maxRow > 0 else { return }
+
+        let row = Int(scrollView.contentOffset.y / cellDimension.height)
+        let clampedRow = max(0, min(row, maxRow))
+
+        if clampedRow != displayBuffer.yDisp {
+            isSyncingYDispFromScroll = true
+            terminal.setViewYDisp(clampedRow)
+            terminal.refresh(startRow: 0, endRow: terminal.rows)
+            updateDisplay(notifyAccessibility: false)
+            terminalDelegate?.scrolled(source: self, position: scrollPosition)
+            isSyncingYDispFromScroll = false
+        }
+    }
+
+    public func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        if !decelerate {
+            checkIfScrolledToBottom()
+        }
+    }
+
+    public func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        checkIfScrolledToBottom()
+    }
+
+    private func checkIfScrolledToBottom() {
+        let displayBuffer = terminal.displayBuffer
+        let maxRow = displayBuffer.lines.count - displayBuffer.rows
+        if maxRow <= 0 || displayBuffer.yDisp >= maxRow {
+            userScrolling = false
+            terminal.userScrolling = false
+        }
+    }
 
     func getCurrentGraphicsContext () -> CGContext?
     {
@@ -2023,7 +2076,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     func ensureCaretIsVisible ()
     {
         let displayBuffer = terminal.displayBuffer
-        contentOffset = CGPoint (x: 0, y: CGFloat (displayBuffer.lines.count-displayBuffer.rows)*cellDimension.height)
+        // Scroll to the bottom (where the caret is)
+        userScrolling = false
+        terminal.userScrolling = false
+        let maxRow = displayBuffer.lines.count - displayBuffer.rows
+        terminal.setViewYDisp(max(0, maxRow))
+        contentOffset = CGPoint (x: 0, y: CGFloat (max(0, maxRow))*cellDimension.height)
     }
     
     public func deleteBackward() {

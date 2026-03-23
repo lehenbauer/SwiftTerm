@@ -1883,7 +1883,16 @@ extension TerminalView {
         let newPosition = max (0, min (displayBuffer.yDisp + lines, displayBuffer.lines.count - displayBuffer.rows))
         scrollTo (row: newPosition)
     }
-      
+
+    /// Scrolls to the bottom of the terminal and resumes auto-scrolling on new output
+    public func scrollToBottom()
+    {
+        terminal.userScrolling = false
+        let displayBuffer = terminal.displayBuffer
+        let maxRow = max(0, displayBuffer.lines.count - displayBuffer.rows)
+        scrollTo(row: maxRow)
+    }
+
     func feedPrepare()
     {
         search.invalidate()
