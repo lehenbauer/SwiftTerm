@@ -376,7 +376,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         if elapsed >= 1.0 {
             let totalRows = debugRowsRebuilt + debugRowsCached
             let fps = Double(debugFrameCount) / elapsed
-            print(String(format: "Metal FPS: %.1f (rows rebuilt: %d/%d)", fps, debugRowsRebuilt, totalRows))
+            // print(String(format: "Metal FPS: %.1f (rows rebuilt: %d/%d)", fps, debugRowsRebuilt, totalRows))
             debugFrameCount = 0
             debugLastLogTime = now
         }
