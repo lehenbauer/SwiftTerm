@@ -1935,6 +1935,20 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         return true
     }
 
+    func sendShiftTabFromAccessory() {
+        if terminal.keyboardEnhancementFlags.isEmpty {
+            send(EscapeSequences.cmdBackTab)
+            return
+        }
+        _ = sendKittyEvent(KittyKeyEvent(key: .functional(.tab),
+                                         modifiers: [.shift],
+                                         eventType: .press,
+                                         text: nil,
+                                         shiftedKey: nil,
+                                         baseLayoutKey: nil,
+                                         composing: kittyIsComposing))
+    }
+
     private func sendKittyTextInput(_ text: String, applyModifiers: Bool) {
         let flags = terminal.keyboardEnhancementFlags
         let controlActive = applyModifiers && (terminalAccessory?.controlModifier ?? controlModifier ?? false)

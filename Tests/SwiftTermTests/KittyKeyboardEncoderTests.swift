@@ -88,6 +88,17 @@ final class KittyKeyboardEncoderTests: XCTestCase {
                      expected: "\u{1b}[9;2u")
     }
 
+    func testShiftTabWithoutDisambiguateUsesLegacyBackTab() {
+        assertEncode(KittyKeyEvent(key: .functional(.tab),
+                                   modifiers: [.shift],
+                                   eventType: .press,
+                                   text: nil,
+                                   shiftedKey: nil,
+                                   baseLayoutKey: nil),
+                     flags: [],
+                     expected: "\u{1b}[Z")
+    }
+
     func testShiftBackspaceWithDisambiguateUsesCsiU() {
         assertEncode(KittyKeyEvent(key: .functional(.backspace),
                                    modifiers: [.shift],

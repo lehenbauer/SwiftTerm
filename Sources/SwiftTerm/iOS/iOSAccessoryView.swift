@@ -23,10 +23,17 @@ public class TerminalAccessory: UIInputView, UIInputViewAudioFeedback {
     public weak var terminalView: TerminalView?
     weak var terminal: Terminal?
     var controlButton: UIButton?
+    var shiftButton: UIButton?
     /// This tracks whether the "control" button is turned on or not
     public var controlModifier: Bool = false {
         didSet {
             controlButton?.isSelected = controlModifier
+        }
+    }
+    /// This tracks whether the "shift" button is turned on or not
+    public var shiftModifier: Bool = false {
+        didSet {
+            shiftButton?.isSelected = shiftModifier
         }
     }
     
@@ -60,6 +67,7 @@ public class TerminalAccessory: UIInputView, UIInputViewAudioFeedback {
     
     func clickAndSend (_ data: [UInt8])
     {
+        clearShiftModifier()
         #if os(iOS)
         UIDevice.current.playInputClick()
         #endif
@@ -68,6 +76,7 @@ public class TerminalAccessory: UIInputView, UIInputViewAudioFeedback {
 
     func clickAndInsertText (_ text: String)
     {
+        clearShiftModifier()
         #if os(iOS)
         UIDevice.current.playInputClick()
         #endif
@@ -75,7 +84,17 @@ public class TerminalAccessory: UIInputView, UIInputViewAudioFeedback {
     }
     
     @objc func esc (_ sender: AnyObject) { clickAndSend ([0x1b]) }
-    @objc func tab (_ sender: AnyObject) { clickAndSend ([0x9]) }
+    @objc func tab (_ sender: AnyObject) {
+        #if os(iOS)
+        UIDevice.current.playInputClick()
+        #endif
+        if shiftModifier {
+            clearShiftModifier()
+            terminalView?.sendShiftTabFromAccessory()
+        } else {
+            terminalView?.send ([0x9])
+        }
+    }
     @objc func tilde (_ sender: AnyObject) { clickAndInsertText ("~") }
     @objc func pipe (_ sender: AnyObject) { clickAndInsertText ("|") }
     @objc func slash (_ sender: AnyObject) { clickAndInsertText ("/") }
@@ -95,6 +114,12 @@ public class TerminalAccessory: UIInputView, UIInputViewAudioFeedback {
     func ctrl (_ sender: UIButton)
     {
         controlModifier.toggle()
+    }
+
+    @objc
+    func shift (_ sender: UIButton)
+    {
+        shiftModifier.toggle()
     }
 
     // Controls the timer for auto-repeat
@@ -128,22 +153,30 @@ public class TerminalAccessory: UIInputView, UIInputViewAudioFeedback {
     
     @objc func up (_ sender: UIButton)
     {
+        clearShiftModifier()
         startTimerForKeypress { self.terminalView?.sendKeyUp () }
     }
     
     @objc func down (_ sender: UIButton)
     {
+        clearShiftModifier()
         startTimerForKeypress { self.terminalView?.sendKeyDown () }
     }
     
     @objc func left (_ sender: UIButton)
     {
+        clearShiftModifier()
         startTimerForKeypress { self.terminalView?.sendKeyLeft() }
     }
     
     @objc func right (_ sender: UIButton)
     {
+        clearShiftModifier()
         startTimerForKeypress { self.terminalView?.sendKeyRight() }
+    }
+
+    private func clearShiftModifier() {
+        shiftModifier = false
     }
 
 
@@ -195,17 +228,32 @@ public class TerminalAccessory: UIInputView, UIInputViewAudioFeedback {
         floatViews = []
         terminalView?.setupKeyboardButtonColors ()
         let useSmall = self._useSmall
+        let usesPhoneShiftKey = UIDevice.current.userInterfaceIdiom == .phone
         if useSmall {
             leftViews.append(makeButton("", #selector(esc), icon: "escape", isNormal: false))
             let controlButton = makeButton("", #selector(ctrl), icon: "control", isNormal: false)
             leftViews.append(controlButton)
             self.controlButton = controlButton
+            if usesPhoneShiftKey {
+                let shiftButton = makeButton("⇧", #selector(shift), isNormal: false)
+                leftViews.append(shiftButton)
+                self.shiftButton = shiftButton
+            } else {
+                self.shiftButton = nil
+            }
             leftViews.append(makeButton("", #selector(tab), icon: "arrow.right.to.line.compact"))
         } else {
             leftViews.append(makeButton ("esc", #selector(esc), isNormal: false))
             let controlButton = makeButton ("ctrl", #selector(ctrl), isNormal: false)
             leftViews.append(controlButton)
             self.controlButton = controlButton
+            if usesPhoneShiftKey {
+                let shiftButton = makeButton ("shift", #selector(shift), isNormal: false)
+                leftViews.append(shiftButton)
+                self.shiftButton = shiftButton
+            } else {
+                self.shiftButton = nil
+            }
             leftViews.append(makeButton("", #selector(tab), icon: "arrow.right.to.line.compact", isNormal: false))
             //leftViews.append(makeButton ("tab", #selector(tab)))
         }
@@ -259,7 +307,9 @@ public class TerminalAccessory: UIInputView, UIInputViewAudioFeedback {
         } else {
             floatViews.append(makeButton ("~", #selector(tilde)))
             floatViews.append(makeButton ("|", #selector(pipe)))
-            floatViews.append(makeButton ("/", #selector(slash)))
+            if !usesPhoneShiftKey {
+                floatViews.append(makeButton ("/", #selector(slash)))
+            }
             floatViews.append(makeButton ("-", #selector(dash)))
         }
         floatViews.forEach {
