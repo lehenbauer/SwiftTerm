@@ -229,12 +229,14 @@ public class TerminalAccessory: UIInputView, UIInputViewAudioFeedback {
         terminalView?.setupKeyboardButtonColors ()
         let useSmall = self._useSmall
         let usesPhoneShiftKey = UIDevice.current.userInterfaceIdiom == .phone
+        let usesPadShiftKey = UIDevice.current.userInterfaceIdiom == .pad
+        let usesAccessoryShiftKey = usesPhoneShiftKey || usesPadShiftKey
         if useSmall {
             leftViews.append(makeButton("", #selector(esc), icon: "escape", isNormal: false))
             let controlButton = makeButton("", #selector(ctrl), icon: "control", isNormal: false)
             leftViews.append(controlButton)
             self.controlButton = controlButton
-            if usesPhoneShiftKey {
+            if usesAccessoryShiftKey {
                 let shiftButton = makeButton("⇧", #selector(shift), isNormal: false)
                 leftViews.append(shiftButton)
                 self.shiftButton = shiftButton
@@ -247,7 +249,7 @@ public class TerminalAccessory: UIInputView, UIInputViewAudioFeedback {
             let controlButton = makeButton ("ctrl", #selector(ctrl), isNormal: false)
             leftViews.append(controlButton)
             self.controlButton = controlButton
-            if usesPhoneShiftKey {
+            if usesAccessoryShiftKey {
                 let shiftButton = makeButton ("shift", #selector(shift), isNormal: false)
                 leftViews.append(shiftButton)
                 self.shiftButton = shiftButton
@@ -270,7 +272,12 @@ public class TerminalAccessory: UIInputView, UIInputViewAudioFeedback {
         // calculate aditional space we can give to keys we want to be bigger (all top level except function keys)
         let minWidth: CGFloat = useSmall ? 20.0 : (UIDevice.current.userInterfaceIdiom == .phone) ? 22 : 32
         let maxFuncKeyWidth = (minWidth + buttonPad) * 10
-        let importantKeysCount: Double = useSmall ? 11 : 13
+        let importantKeysCount: Double
+        if usesPadShiftKey {
+            importantKeysCount = useSmall ? 12 : 14
+        } else {
+            importantKeysCount = useSmall ? 11 : 13
+        }
         let maxSpaceForImportantKeys = frame.width - maxFuncKeyWidth - buttonPad
         var aditionalSpaceForImportantKeys: CGFloat = 0
         if maxSpaceForImportantKeys > 0 {
