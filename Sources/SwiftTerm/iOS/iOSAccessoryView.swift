@@ -346,7 +346,7 @@ public class TerminalAccessory: UIInputView, UIInputViewAudioFeedback {
         addOptional("F8", #selector(f8))
         addOptional("F9", #selector(f9))
         addOptional("F10", #selector(f10))
-        let smallerFloatViews = useSmall ? floatViews.suffix(floatViews.count - 2) : floatViews.suffix(floatViews.count - 4)
+        let smallerFloatViews = TerminalAccessoryLayout.shrinkableTail(of: floatViews, useSmall: useSmall)
         smallerFloatViews.forEach {
             setMinWidth($0)
         }
