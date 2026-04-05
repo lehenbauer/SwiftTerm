@@ -1346,7 +1346,6 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             contentOffset = CGPoint(x: 0, y: targetY)
         }
     }
-
 #if canImport(MetalKit)
     func metalVisibleRange() -> ClosedRange<Int>? {
         let buffer = terminal.displayBuffer
@@ -1365,7 +1364,6 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         return firstRow...lastRow
     }
 #endif
-
     var userScrolling = false
     private var isSyncingYDispFromScroll = false
 
