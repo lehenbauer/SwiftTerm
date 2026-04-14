@@ -1933,6 +1933,20 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         return true
     }
 
+    public func sendEnterFromAccessory() {
+        if terminal.keyboardEnhancementFlags.isEmpty {
+            send(data: returnByteSequence [0...])
+            return
+        }
+        _ = sendKittyEvent(KittyKeyEvent(key: .functional(.enter),
+                                         modifiers: [],
+                                         eventType: .press,
+                                         text: nil,
+                                         shiftedKey: nil,
+                                         baseLayoutKey: nil,
+                                         composing: kittyIsComposing))
+    }
+
     func sendShiftTabFromAccessory() {
         if terminal.keyboardEnhancementFlags.isEmpty {
             send(EscapeSequences.cmdBackTab)
