@@ -64,8 +64,7 @@ import CoreGraphics
 @inline(__always)
 internal func uitiLog (_ message: @autoclosure () -> String) {
     guard TerminalView.textInputDebugEnabled else { return }
-    //TerminalView.textInputLogCounter += 1
-    //print ("UITextInput[\(TerminalView.textInputLogCounter)]: \(message())")
+    print ("UITextInput: \(message())")
 }
 
 extension TerminalView: UITextInput {    
@@ -150,10 +149,9 @@ extension TerminalView: UITextInput {
             replacementText = normalized
         }
         let backspaces = oldText.count
-        for _ in 0..<backspaces {
-            self.send ([0x7f])
-        }
-        self.send (txt: replacementText)
+        var buffer = [UInt8](repeating: 0x7f, count: backspaces)
+        buffer.append(contentsOf: replacementText.utf8)
+        self.send(buffer)
 
         let insertionIndex = r.startPosition.offset
         textInputStorage.replaceSubrange(r.fullRange(in: textInputStorage), with: replacementText)
