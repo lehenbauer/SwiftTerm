@@ -1187,6 +1187,18 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         }
     }
 
+    /// Optional color used when rendering bold text whose color attribute is
+    /// the default foreground (no explicit SGR color). When set, default-fg
+    /// bold glyphs paint with this color instead of `nativeForegroundColor`,
+    /// giving hosts a way to brighten bold text without changing regular
+    /// text (matches iTerm2's "bold color" profile behavior). When nil, bold
+    /// default-fg text uses `nativeForegroundColor` as before.
+    public var nativeBoldForegroundColor: UIColor? {
+        didSet {
+            colorsChanged()
+        }
+    }
+
     /// Controls the color for the caret
     public var caretColor: UIColor {
         get { caretView?.caretColor ?? UIColor.black }

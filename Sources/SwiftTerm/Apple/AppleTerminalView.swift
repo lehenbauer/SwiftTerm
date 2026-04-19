@@ -222,6 +222,9 @@ extension TerminalView {
         switch color {
         case .defaultColor:
             if isFg {
+                if isBold, let boldFg = nativeBoldForegroundColor {
+                    return boldFg
+                }
                 return nativeForegroundColor
             } else {
                 return nativeBackgroundColor
