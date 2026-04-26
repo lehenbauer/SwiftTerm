@@ -1234,6 +1234,14 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             return .keypadEqual
         case kVK_ANSI_KeypadClear:
             return .keypadBegin
+        case kVK_UpArrow:
+            return .up
+        case kVK_DownArrow:
+            return .down
+        case kVK_LeftArrow:
+            return .left
+        case kVK_RightArrow:
+            return .right
         default:
             break
         }

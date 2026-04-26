@@ -2,10 +2,29 @@
 //  KittyKeyboardEncoderTests.swift
 //
 #if os(macOS)
+import AppKit
+import Carbon.HIToolbox
 import XCTest
 @testable import SwiftTerm
 
 final class KittyKeyboardEncoderTests: XCTestCase {
+    private final class CaptureTerminalViewDelegate: TerminalViewDelegate {
+        var sent: [[UInt8]] = []
+
+        func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {}
+        func setTerminalTitle(source: TerminalView, title: String) {}
+        func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
+        func send(source: TerminalView, data: ArraySlice<UInt8>) {
+            sent.append(Array(data))
+        }
+        func scrolled(source: TerminalView, position: Double) {}
+        func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {}
+        func bell(source: TerminalView) {}
+        func clipboardCopy(source: TerminalView, content: Data) {}
+        func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
+        func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
+    }
+
     private func encode(_ event: KittyKeyEvent,
                         flags: KittyKeyboardFlags,
                         applicationCursor: Bool = false,
@@ -472,6 +491,33 @@ final class KittyKeyboardEncoderTests: XCTestCase {
                                    baseLayoutKey: nil),
                      flags: [.disambiguate],
                      expected: "\u{1b}[1;65A")
+    }
+
+    func testMacCursorClusterArrowsDoNotReportAsKeypadInKittyMode() {
+        let view = TerminalView(frame: .init(x: 0, y: 0, width: 640, height: 480))
+        let delegate = CaptureTerminalViewDelegate()
+        view.terminalDelegate = delegate
+        view.feed(text: "\u{1b}[=1u")
+
+        XCTAssertEqual(view.getTerminal().keyboardEnhancementFlags, [.disambiguate])
+
+        let rightArrow = String(UnicodeScalar(NSRightArrowFunctionKey)!)
+        let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [.numericPad],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: rightArrow,
+            charactersIgnoringModifiers: rightArrow,
+            isARepeat: false,
+            keyCode: UInt16(kVK_RightArrow)
+        )!
+
+        view.keyDown(with: event)
+
+        XCTAssertEqual(delegate.sent.last, Array("\u{1b}[C".utf8))
     }
 }
 #endif
