@@ -2214,10 +2214,53 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         return code
     }
     var keyRepeat: Timer?
+    private static let keyRepeatInitialDelay: TimeInterval = 0.4
+    private static let keyRepeatInterval: TimeInterval = 0.1
 
     private struct PendingKittyKeyEvent {
         let key: UIKey
         let eventType: KittyKeyboardEventType
+    }
+
+    private func startKeyRepeat(_ action: @escaping () -> Void) {
+        keyRepeat?.invalidate()
+        keyRepeat = Timer(
+            fire: Date(timeInterval: Self.keyRepeatInitialDelay, since: Date()),
+            interval: Self.keyRepeatInterval,
+            repeats: true
+        ) { _ in
+            action()
+        }
+        if let keyRepeat {
+            RunLoop.current.add(keyRepeat, forMode: .default)
+        }
+    }
+
+    private func printableHardwareInputText(for key: UIKey) -> String? {
+        let text = key.characters
+        guard !text.isEmpty,
+              !key.charactersIgnoringModifiers.isEmpty else {
+            return nil
+        }
+        guard key.modifierFlags.intersection([.alternate, .command, .control]).isEmpty else {
+            return nil
+        }
+        guard text.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value != 0x7f }) else {
+            return nil
+        }
+        return text
+    }
+
+    private func kittyPrintableHardwareEvent(
+        from key: UIKey,
+        text: String,
+        eventType: KittyKeyboardEventType
+    ) -> KittyKeyEvent {
+        if text.unicodeScalars.count == 1,
+           let event = kittyTextEvent(from: key, eventType: eventType, text: text) {
+            return event
+        }
+        return kittyTextEventFromText(text, modifiers: [], eventType: eventType)
     }
 
     private var pendingKittyKeyEvent: PendingKittyKeyEvent?
@@ -2306,10 +2349,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                        sendKittyEvent(kittyEvent) {
                         didHandleEvent = true
                         let modifiers = kittyEvent.modifiers
-                        keyRepeat?.invalidate()
-                        keyRepeat = Timer(fire: Date(timeInterval: 0.4, since: Date()),
-                                          interval: 0.1,
-                                          repeats: true) { _ in
+                        startKeyRepeat { [weak self] in
+                            guard let self else { return }
                             let repeatEvent = KittyKeyEvent(key: kittyEvent.key,
                                                             modifiers: modifiers,
                                                             eventType: repeatEventType,
@@ -2319,7 +2360,25 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                                                             composing: self.kittyIsComposing)
                             _ = self.sendKittyEvent(repeatEvent)
                         }
-                        RunLoop.current.add(keyRepeat!, forMode: .default)
+                        continue
+                    }
+                }
+                if let text = printableHardwareInputText(for: key) {
+                    let pressEvent = kittyPrintableHardwareEvent(
+                        from: key,
+                        text: text,
+                        eventType: .press
+                    )
+                    if sendKittyEvent(pressEvent) {
+                        didHandleEvent = true
+                        let repeatEvent = kittyPrintableHardwareEvent(
+                            from: key,
+                            text: text,
+                            eventType: repeatEventType
+                        )
+                        startKeyRepeat { [weak self] in
+                            _ = self?.sendKittyEvent(repeatEvent)
+                        }
                         continue
                     }
                 }
@@ -2453,17 +2512,15 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                     if !controlBytes.isEmpty {
                         data = .bytes(controlBytes)
                     }
+                } else if let text = printableHardwareInputText(for: key) {
+                    data = .text(text)
                 }
             }
             if let sendableData = data {
                 didHandleEvent = true
-                keyRepeat?.invalidate()
-                keyRepeat = Timer (fire: Date(timeInterval: 0.4, since: Date()),
-                                   interval: 0.1,
-                                   repeats: true) { timer in
-                    self.sendData(data: sendableData)
+                startKeyRepeat { [weak self] in
+                    self?.sendData(data: sendableData)
                 }
-                RunLoop.current.add(keyRepeat!, forMode: .default)
                 sendData (data: sendableData)
             }
         }
