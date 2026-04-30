@@ -76,6 +76,40 @@ final class SelectionTests: TerminalDelegate {
         view.scrollTo(row: 1)
         #expect(view.calculateMouseHit(at: CGPoint(x: 0, y: 10)).grid.row == 1)
     }
+
+    @Test func testLinefeedPreservesScrolledViewportUntilInputOrBottom() {
+        let view = TerminalView(frame: CGRect(origin: .zero, size: .init(width: 120, height: 80)))
+        view.resize(cols: 8, rows: 3)
+        view.getTerminal().changeScrollback(50)
+
+        for index in 0..<10 {
+            view.feed(text: "L\(index)\r\n")
+        }
+
+        let terminal = view.getTerminal()
+        let initialBottom = max(0, terminal.displayBuffer.lines.count - terminal.displayBuffer.rows)
+        let scrolledRow = max(0, initialBottom - 2)
+
+        view.scrollTo(row: scrolledRow)
+        #expect(terminal.displayBuffer.yDisp == scrolledRow)
+        #expect(terminal.userScrolling)
+
+        view.feed(text: "next\r\n")
+        #expect(terminal.displayBuffer.yDisp == scrolledRow)
+        #expect(terminal.userScrolling)
+
+        view.scrollToBottom()
+        let bottomAfterOutput = max(0, terminal.displayBuffer.lines.count - terminal.displayBuffer.rows)
+        #expect(terminal.displayBuffer.yDisp == bottomAfterOutput)
+        #expect(!terminal.userScrolling)
+
+        view.scrollTo(row: max(0, bottomAfterOutput - 2))
+        #expect(terminal.userScrolling)
+
+        view.send(txt: "x")
+        #expect(terminal.displayBuffer.yDisp == terminal.displayBuffer.yBase)
+        #expect(!terminal.userScrolling)
+    }
 #endif
 
     // MARK: - Selection Tests Ported from Ghostty

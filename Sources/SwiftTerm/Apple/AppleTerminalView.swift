@@ -1837,6 +1837,10 @@ extension TerminalView {
     func scrollTo (row: Int, notifyAccessibility: Bool = true)
     {
         let displayBuffer = terminal.displayBuffer
+        #if os(macOS)
+        let maxScrollback = max(0, displayBuffer.lines.count - displayBuffer.rows)
+        terminal.userScrolling = !terminal.isDisplayBufferAlternate && row < maxScrollback
+        #endif
         if row != displayBuffer.yDisp {
             terminal.setViewYDisp (row)
             
