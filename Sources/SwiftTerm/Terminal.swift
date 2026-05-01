@@ -5435,6 +5435,95 @@ open class Terminal {
     {
         changeScrollback(newScrollback)
     }
+
+    @discardableResult
+    public func prependScrollbackCapture(byteArray: ArraySlice<UInt8>, maximumScrollback: Int? = nil) -> Int {
+        guard !byteArray.isEmpty, !isCurrentBufferAlternate else {
+            return 0
+        }
+
+        let rowCount = Self.countCapturedRows(in: byteArray)
+        guard rowCount > 0 else {
+            return 0
+        }
+
+        if let maximumScrollback,
+           maximumScrollback > (normalBuffer.scrollback ?? 0) {
+            changeScrollback(maximumScrollback)
+        }
+
+        let availableCapacity = max(0, normalBuffer.lines.maxLength - normalBuffer.lines.count)
+        guard availableCapacity > 0 else {
+            return 0
+        }
+
+        let parserDelegate = ScrollbackCaptureParserDelegate()
+        let parserOptions = TerminalOptions(cols: cols, rows: max(1, rowCount), scrollback: 0)
+        let parserTerminal = Terminal(delegate: parserDelegate, options: parserOptions)
+        parserTerminal.feed(buffer: byteArray)
+
+        let parsedCount = min(rowCount, parserTerminal.normalBuffer.lines.count)
+        guard parsedCount > 0 else {
+            return 0
+        }
+
+        let keepCount = min(parsedCount, availableCapacity)
+        let start = parsedCount - keepCount
+        var insertedLines: [BufferLine] = []
+        insertedLines.reserveCapacity(keepCount)
+        for index in start..<parsedCount {
+            insertedLines.append(remapCapturedLine(parserTerminal.normalBuffer.lines[index], from: parserTerminal))
+        }
+
+        guard !insertedLines.isEmpty else {
+            return 0
+        }
+
+        normalBuffer.lines.splice(start: 0, deleteCount: 0, items: insertedLines) { _ in }
+        normalBuffer.linesTop -= insertedLines.count
+        normalBuffer.yBase += insertedLines.count
+        normalBuffer.yDisp += insertedLines.count
+        normalBuffer.recalculateLinesWithImagesCount()
+        refresh(startRow: 0, endRow: rows - 1)
+        return insertedLines.count
+    }
+
+    private static func countCapturedRows(in byteArray: ArraySlice<UInt8>) -> Int {
+        guard !byteArray.isEmpty else {
+            return 0
+        }
+        var count = 1
+        var index = byteArray.startIndex
+        while index < byteArray.endIndex {
+            let byte = byteArray[index]
+            if byte == 13 {
+                let next = byteArray.index(after: index)
+                if next < byteArray.endIndex, byteArray[next] == 10 {
+                    count += 1
+                    index = byteArray.index(after: next)
+                    continue
+                }
+            } else if byte == 10 {
+                count += 1
+            }
+            index = byteArray.index(after: index)
+        }
+        return count
+    }
+
+    private func remapCapturedLine(_ sourceLine: BufferLine, from sourceTerminal: Terminal) -> BufferLine {
+        let line = BufferLine(from: sourceLine)
+        for column in 0..<line.count {
+            var charData = line[column]
+            guard charData.code >= Int32(CharData.maxRune),
+                  let character = sourceTerminal.indexToCharMap[charData.code] else {
+                continue
+            }
+            charData.setValue(code: code(for: character), size: Int32(charData.width))
+            line[column] = charData
+        }
+        return line
+    }
     
     func syncScrollArea ()
     {
@@ -6618,6 +6707,11 @@ open class Terminal {
 }
 
 // Default implementations
+private final class ScrollbackCaptureParserDelegate: TerminalDelegate {
+    func send(source: Terminal, data: ArraySlice<UInt8>) {
+    }
+}
+
 public extension TerminalDelegate {
     func cursorStyleChanged (source: Terminal, newStyle: CursorStyle)
     {

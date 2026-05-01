@@ -1954,6 +1954,23 @@ extension TerminalView {
         terminalDelegate?.scrolled(source: self, position: scrollPosition)
         queuePendingDisplay()
     }
+
+    @discardableResult
+    public func prependScrollbackCapture(byteArray: ArraySlice<UInt8>, maximumScrollback: Int? = nil) -> Int {
+        search.invalidate()
+        let insertedRows = terminal.prependScrollbackCapture(
+            byteArray: byteArray,
+            maximumScrollback: maximumScrollback
+        )
+        guard insertedRows > 0 else {
+            return 0
+        }
+        updateScroller()
+        terminalDelegate?.scrolled(source: self, position: scrollPosition)
+        updateDisplay(notifyAccessibility: false)
+        queuePendingDisplay()
+        return insertedRows
+    }
     
     /**
      * Sends the specified slice of byte arrays to the program running under the terminal emulator
