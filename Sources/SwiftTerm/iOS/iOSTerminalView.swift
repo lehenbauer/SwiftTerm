@@ -1348,13 +1348,27 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     func updateScroller ()
     {
         let displayBuffer = terminal.displayBuffer
-        contentSize = CGSize (width: CGFloat (displayBuffer.cols) * cellDimension.width,
-                              height: CGFloat (displayBuffer.lines.count) * cellDimension.height)
+        let updatedContentSize = CGSize (
+            width: CGFloat (displayBuffer.cols) * cellDimension.width,
+            height: CGFloat (displayBuffer.lines.count) * cellDimension.height)
         // Sync contentOffset with yDisp instead of always snapping to bottom.
         // When the user is scrolled up viewing history, yDisp stays put (Terminal
         // respects userScrolling) so contentOffset also stays put.
         let targetY = CGFloat(displayBuffer.yDisp) * cellDimension.height
-        if !isSyncingYDispFromScroll && abs(contentOffset.y - targetY) > 0.5 {
+        let shouldSyncOffset = !isSyncingYDispFromScroll && abs(contentOffset.y - targetY) > 0.5
+        guard contentSize != updatedContentSize || shouldSyncOffset else {
+            return
+        }
+
+        isUpdatingScrollViewFromYDisp = true
+        defer {
+            isUpdatingScrollViewFromYDisp = false
+        }
+
+        if contentSize != updatedContentSize {
+            contentSize = updatedContentSize
+        }
+        if shouldSyncOffset {
             contentOffset = CGPoint(x: 0, y: targetY)
         }
     }
@@ -1378,6 +1392,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
 #endif
     var userScrolling = false
     private var isSyncingYDispFromScroll = false
+    private var isUpdatingScrollViewFromYDisp = false
 
     // MARK: - UIScrollViewDelegate
 
@@ -1388,6 +1403,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
 
     public func scrollViewDidScroll(_ scrollView: UIScrollView) {
         guard !isSyncingYDispFromScroll else { return }
+        guard !isUpdatingScrollViewFromYDisp else { return }
         guard cellDimension.height > 0 else { return }
 
         let displayBuffer = terminal.displayBuffer
@@ -1399,11 +1415,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
 
         if clampedRow != displayBuffer.yDisp {
             isSyncingYDispFromScroll = true
+            defer {
+                isSyncingYDispFromScroll = false
+            }
             terminal.setViewYDisp(clampedRow)
             terminal.refresh(startRow: 0, endRow: terminal.rows)
             updateDisplay(notifyAccessibility: false)
             terminalDelegate?.scrolled(source: self, position: scrollPosition)
-            isSyncingYDispFromScroll = false
         }
     }
 
