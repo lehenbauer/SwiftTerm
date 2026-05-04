@@ -1665,6 +1665,8 @@ extension TerminalView {
             caretView.removeFromSuperview()
         }
         let doublePosition = buffer.lines [vy].renderMode == .single ? 1.0 : 2.0
+        // Pending-wrap keeps x at cols until the next printable character.
+        let cursorColumn = min(max(buffer.x, 0), max(buffer.cols - 1, 0))
         #if os(iOS) || os(visionOS)
         let offset = (cellDimension.height * (CGFloat(buffer.y+(buffer.yBase))))
         let lineOrigin = CGPoint(x: 0, y: offset)
@@ -1672,8 +1674,8 @@ extension TerminalView {
         let offset = (cellDimension.height * (CGFloat(buffer.y-(buffer.yDisp-buffer.yBase)+1)))
         let lineOrigin = CGPoint(x: 0, y: frame.height - offset)
         #endif
-        caretView.frame.origin = CGPoint(x: lineOrigin.x + (cellDimension.width * doublePosition * CGFloat(buffer.x)), y: lineOrigin.y)
-        caretView.setText (ch: buffer.lines [vy][buffer.x])
+        caretView.frame.origin = CGPoint(x: lineOrigin.x + (cellDimension.width * doublePosition * CGFloat(cursorColumn)), y: lineOrigin.y)
+        caretView.setText (ch: buffer.lines [vy][cursorColumn])
     }
     
     // Does not use a default argument and merge, because it is called back
