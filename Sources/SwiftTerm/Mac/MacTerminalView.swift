@@ -683,10 +683,17 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             scroller.alphaValue = 0
             return
         }
-        scroller.isEnabled = canScroll
-        let isVisible = canScroll && (scrollerStyle == .legacy || overlayScrollerIsRevealed)
-        scroller.isHidden = !isVisible
-        scroller.alphaValue = isVisible ? 1 : 0
+        guard canScroll else {
+            scroller.isEnabled = false
+            scroller.isHidden = true
+            scroller.alphaValue = 0
+            invalidateScrollerLayoutAndDisplay()
+            return
+        }
+        let isRevealed = scrollerStyle == .legacy || overlayScrollerIsRevealed
+        scroller.isEnabled = isRevealed
+        scroller.isHidden = false
+        scroller.alphaValue = isRevealed ? 1 : 0
         invalidateScrollerLayoutAndDisplay()
     }
 

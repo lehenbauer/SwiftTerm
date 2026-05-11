@@ -153,6 +153,25 @@ final class SelectionTests: TerminalDelegate {
         #expect(view.window === window)
         #expect(view.scrollerStyle == preferredStyle)
     }
+
+    @MainActor
+    @Test func testOverlayScrollerStaysAttachedWhileFadedOut() throws {
+        let view = TerminalView(frame: CGRect(origin: .zero, size: .init(width: 120, height: 80)))
+        view.resize(cols: 12, rows: 4)
+        view.getTerminal().changeScrollback(100)
+
+        for index in 0..<20 {
+            view.feed(text: "L\(index)\r\n")
+        }
+        view.scrollToBottom()
+        view.scrollerStyle = .overlay
+
+        let scroller = try #require(view.subviews.compactMap { $0 as? NSScroller }.first)
+        #expect(view.canScroll)
+        #expect(!scroller.isHidden)
+        #expect(scroller.alphaValue == 0)
+        #expect(!scroller.isEnabled)
+    }
 #endif
 
     // MARK: - Selection Tests Ported from Ghostty
