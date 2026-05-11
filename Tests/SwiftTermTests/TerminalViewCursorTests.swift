@@ -18,5 +18,59 @@ final class TerminalViewCursorTests {
         let expectedX = view.cellDimension.width * 4
         #expect(abs(view.caretFrame.origin.x - expectedX) < 0.001)
     }
+
+    @Test func testMetalBlinkFrameDoesNotHideInactiveCursor() {
+        #expect(MetalTerminalRenderer.shouldHideCursorForBlinkFrame(
+            style: .blinkBlock,
+            hasFocus: false,
+            cursorBlinkOn: false
+        ) == false)
+        #expect(MetalTerminalRenderer.shouldHideCursorForBlinkFrame(
+            style: .blinkUnderline,
+            hasFocus: false,
+            cursorBlinkOn: false
+        ) == false)
+        #expect(MetalTerminalRenderer.shouldHideCursorForBlinkFrame(
+            style: .blinkBar,
+            hasFocus: false,
+            cursorBlinkOn: false
+        ) == false)
+    }
+
+    @Test func testMetalBlinkFrameStillHidesFocusedBlinkingCursor() {
+        #expect(MetalTerminalRenderer.shouldHideCursorForBlinkFrame(
+            style: .blinkBlock,
+            hasFocus: true,
+            cursorBlinkOn: false
+        ) == true)
+        #expect(MetalTerminalRenderer.shouldHideCursorForBlinkFrame(
+            style: .steadyBlock,
+            hasFocus: true,
+            cursorBlinkOn: false
+        ) == false)
+    }
+
+    @Test func testMetalBlinkTimerRunsOnlyForVisibleFocusedBlinkingCursor() {
+        #expect(MetalTerminalRenderer.shouldAnimateCursorBlink(
+            style: .blinkBlock,
+            hasFocus: true,
+            cursorHidden: false
+        ) == true)
+        #expect(MetalTerminalRenderer.shouldAnimateCursorBlink(
+            style: .blinkBlock,
+            hasFocus: false,
+            cursorHidden: false
+        ) == false)
+        #expect(MetalTerminalRenderer.shouldAnimateCursorBlink(
+            style: .blinkBlock,
+            hasFocus: true,
+            cursorHidden: true
+        ) == false)
+        #expect(MetalTerminalRenderer.shouldAnimateCursorBlink(
+            style: .steadyBlock,
+            hasFocus: true,
+            cursorHidden: false
+        ) == false)
+    }
 }
 #endif

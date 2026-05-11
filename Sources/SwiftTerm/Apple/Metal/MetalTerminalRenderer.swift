@@ -334,7 +334,11 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
 #endif
         view.drawableSize = CGSize(width: view.bounds.width * scale, height: view.bounds.height * scale)
         let cursorStyle = terminalView.terminal.options.cursorStyle
-        let shouldBlink = isBlinkStyle(cursorStyle) && !terminalView.terminal.cursorHidden
+        let shouldBlink = Self.shouldAnimateCursorBlink(
+            style: cursorStyle,
+            hasFocus: cursorHasFocus(terminalView),
+            cursorHidden: terminalView.terminal.cursorHidden
+        )
         updateCursorBlinkTimer(shouldBlink: shouldBlink)
 
 #if canImport(os)
@@ -2066,7 +2070,12 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             return ([], [], [])
         }
         let cursorStyle = terminalView.terminal.options.cursorStyle
-        if isBlinkStyle(cursorStyle) && !cursorBlinkOn {
+        let hasFocus = cursorHasFocus(terminalView)
+        if Self.shouldHideCursorForBlinkFrame(
+            style: cursorStyle,
+            hasFocus: hasFocus,
+            cursorBlinkOn: cursorBlinkOn
+        ) {
             return ([], [], [])
         }
         let lineOffset = cellHeight * CGFloat(cursorRow - yDisp + 1)
@@ -2080,12 +2089,6 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         let y0 = lineOriginPx.y
         let x1 = x0 + cellWidthPx
         let y1 = y0 + cellHeightPx
-
-        #if os(macOS)
-        let hasFocus = terminalView.caretViewTracksFocus ? terminalView.hasFocus : true
-        #else
-        let hasFocus = terminalView.caretViewTracksFocus ? terminalView.isFirstResponder : true
-        #endif
         let cursorColor = colorToSIMD(terminalView.caretColor)
         let cursorClip = ClipRect(minX: Float(x0), minY: Float(y0), maxX: Float(x1), maxY: Float(y1))
         var colorVertices: [ColorVertex] = []
@@ -2604,7 +2607,31 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         return try? device.makeRenderPipelineState(descriptor: descriptor)
     }
 
-    private func isBlinkStyle(_ style: CursorStyle) -> Bool {
+    static func shouldAnimateCursorBlink(
+        style: CursorStyle,
+        hasFocus: Bool,
+        cursorHidden: Bool
+    ) -> Bool {
+        hasFocus && !cursorHidden && isBlinkStyle(style)
+    }
+
+    static func shouldHideCursorForBlinkFrame(
+        style: CursorStyle,
+        hasFocus: Bool,
+        cursorBlinkOn: Bool
+    ) -> Bool {
+        hasFocus && isBlinkStyle(style) && !cursorBlinkOn
+    }
+
+    private func cursorHasFocus(_ terminalView: TerminalView) -> Bool {
+        #if os(macOS)
+        terminalView.caretViewTracksFocus ? terminalView.hasFocus : true
+        #else
+        terminalView.caretViewTracksFocus ? terminalView.isFirstResponder : true
+        #endif
+    }
+
+    private static func isBlinkStyle(_ style: CursorStyle) -> Bool {
         switch style {
         case .blinkBlock, .blinkUnderline, .blinkBar:
             return true
