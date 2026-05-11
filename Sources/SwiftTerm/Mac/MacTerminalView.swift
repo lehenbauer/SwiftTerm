@@ -625,8 +625,15 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            guard let self = self, self.followsSystemScrollerStyle else { return }
-            self.scrollerStyle = NSScroller.preferredScrollerStyle
+            self?.refreshScrollerStyle()
+        }
+    }
+
+    private func refreshScrollerStyle() {
+        if followsSystemScrollerStyle {
+            scrollerStyle = NSScroller.preferredScrollerStyle
+        } else {
+            applyScrollerStyle()
         }
     }
 
@@ -636,7 +643,15 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         overlayScrollerIsRevealed = false
         scroller?.scrollerStyle = scrollerStyle
         scrollerWidthConstraint?.constant = scrollerWidth
+        invalidateScrollerLayoutAndDisplay()
         updateScrollerVisibility()
+    }
+
+    private func invalidateScrollerLayoutAndDisplay() {
+        guard let scroller else { return }
+        needsLayout = true
+        scroller.needsLayout = true
+        scroller.needsDisplay = true
     }
 
     private func revealOverlayScrollerTemporarily() {
@@ -672,6 +687,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         let isVisible = canScroll && (scrollerStyle == .legacy || overlayScrollerIsRevealed)
         scroller.isHidden = !isVisible
         scroller.alphaValue = isVisible ? 1 : 0
+        invalidateScrollerLayoutAndDisplay()
     }
 
     func updateScrollerFrame() {
@@ -805,6 +821,13 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     func makeFirstResponder ()
     {
         window?.makeFirstResponder (self)
+    }
+
+    open override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil else { return }
+        refreshScrollerStyle()
+        updateScroller()
     }
 
     open override func setFrameSize(_ newSize: NSSize) {

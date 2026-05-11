@@ -132,6 +132,27 @@ final class SelectionTests: TerminalDelegate {
         #expect(view.followsSystemScrollerStyle)
         #expect(view.scrollerStyle == NSScroller.preferredScrollerStyle)
     }
+
+    @MainActor
+    @Test func testScrollerStyleRefreshesWhenAttachedToWindow() {
+        let view = TerminalView(frame: CGRect(origin: .zero, size: .init(width: 120, height: 80)))
+        let preferredStyle = NSScroller.preferredScrollerStyle
+        let staleStyle: NSScroller.Style = preferredStyle == .overlay ? .legacy : .overlay
+        view.scrollerStyle = staleStyle
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 120, height: 80),
+            styleMask: [],
+            backing: .buffered,
+            defer: true
+        )
+        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: 120, height: 80))
+        window.contentView = contentView
+        contentView.addSubview(view)
+
+        #expect(view.window === window)
+        #expect(view.scrollerStyle == preferredStyle)
+    }
 #endif
 
     // MARK: - Selection Tests Ported from Ghostty
