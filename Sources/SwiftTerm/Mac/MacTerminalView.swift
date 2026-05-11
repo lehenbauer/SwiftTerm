@@ -310,12 +310,16 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             mtkView.colorPixelFormat = .bgra8Unorm
             let renderer = try MetalTerminalRenderer(view: mtkView, terminalView: self)
             mtkView.delegate = renderer
-            if let caretView = caretView {
+            if let scroller = scroller {
+                addSubview(mtkView, positioned: .below, relativeTo: scroller)
+            } else if let caretView = caretView {
                 addSubview(mtkView, positioned: .below, relativeTo: caretView)
-                caretView.disableAnimations()
-                caretView.isHidden = true
             } else {
                 addSubview(mtkView, positioned: .below, relativeTo: nil)
+            }
+            if let caretView = caretView {
+                caretView.disableAnimations()
+                caretView.isHidden = true
             }
             metalView = mtkView
             metalRenderer = renderer
