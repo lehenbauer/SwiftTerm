@@ -2096,7 +2096,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         var glyphVerticesColor: [GlyphVertex] = []
 
         if !hasFocus {
-            let stroke = max(1, 3 * scale)
+            let stroke = Self.inactiveCursorOutlineThickness(scale: scale)
             colorVertices.append(contentsOf: quadVertices(x0: CGFloat(x0),
                                                           y0: CGFloat(y0),
                                                           x1: CGFloat(x1),
@@ -2621,6 +2621,12 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         cursorBlinkOn: Bool
     ) -> Bool {
         hasFocus && isBlinkStyle(style) && !cursorBlinkOn
+    }
+
+    static func inactiveCursorOutlineThickness(scale: CGFloat) -> CGFloat {
+        // CaretView strokes a 3pt outline centered on its bounds and clips it,
+        // so only half the stroke is visible inside the cursor.
+        max(1, 1.5 * scale)
     }
 
     private func cursorHasFocus(_ terminalView: TerminalView) -> Bool {

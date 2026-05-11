@@ -72,5 +72,10 @@ final class TerminalViewCursorTests {
             cursorHidden: false
         ) == false)
     }
+
+    @Test func testMetalInactiveCursorOutlineMatchesClippedCaretStroke() {
+        #expect(MetalTerminalRenderer.inactiveCursorOutlineThickness(scale: 1) == 1.5)
+        #expect(MetalTerminalRenderer.inactiveCursorOutlineThickness(scale: 2) == 3)
+    }
 }
 #endif
