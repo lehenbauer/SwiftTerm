@@ -52,7 +52,7 @@ public extension Notification.Name {
  * defaults, otherwise, this uses its own set of defaults colors.
  */
 open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollViewDelegate, TerminalDelegate, UIPointerInteractionDelegate {
-    public static var textInputDebugEnabled: Bool = false
+    public static var textInputDebugEnabled: Bool = ProcessInfo.processInfo.environment["SWIFTTERM_TEXT_INPUT_DEBUG"] == "1"
     internal static var textInputLogCounter: Int = 0
 
     struct FontSet {
@@ -117,8 +117,15 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
      */
     public weak var terminalDelegate: TerminalViewDelegate?
 
-    /// Renderer buffering mode (used by the Metal renderer on macOS).
-    /// Present for API parity; iOS currently uses CoreGraphics.
+    /// Controls how the Metal renderer builds GPU buffers each frame.
+    ///
+    /// The default is ``MetalBufferingMode/perRowPersistent``, which caches
+    /// per-row vertex data and only rebuilds dirty rows. Switch to
+    /// ``MetalBufferingMode/perFrameAggregated`` for workloads that repaint
+    /// most of the screen every frame.
+    ///
+    /// You can change this property at any time; the renderer picks up the
+    /// new mode on the next frame.
     public var metalBufferingMode: MetalBufferingMode = .perRowPersistent
     
     /**
@@ -184,6 +191,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     var search: SearchService!
     var debug: UIView?
     var pendingDisplay: Bool = false
+    /// Debounce timer for sync-end render — coalesces rapid sync block sequences.
+    var syncEndRenderTimer: DispatchWorkItem? = nil
+    /// True from first BSU until syncSequenceSettleMs after last ESU.
+    var inSyncSequence: Bool = false
+    /// Milliseconds to wait after the last ESU before rendering.
+    var syncSequenceSettleMs: Int = 100
 #if canImport(MetalKit)
     var metalView: MTKView?
     var metalRenderer: MetalTerminalRenderer?
@@ -191,12 +204,17 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     private var useMetalRenderer = false
     var metalDirtyRange: ClosedRange<Int>?
 
+    /// Whether the terminal view is currently using the Metal GPU renderer.
+    ///
+    /// Returns `true` after a successful call to ``setUseMetal(_:)`` with
+    /// `true`, and `false` otherwise.
     public var isUsingMetalRenderer: Bool {
         return useMetalRenderer
     }
 #endif
     var cellDimension: CellDimension
     var caretView: CaretView?
+    var _lineSpacing: CGFloat = 1.0
     var terminal: Terminal!
     private var progressBarView: TerminalProgressBarView?
     private var progressReportTimer: Timer?
@@ -273,6 +291,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         self.fontSet = FontSet (font: font ?? FontSet.defaultFont)
         cellDimension = CellDimension(width: 1, height: 1)
         super.init (frame: frame)
+        isAccessibilityElement = true
+        accessibilityTraits.formUnion([.staticText, .causesPageTurn])
+        accessibilityTextualContext = .sourceCode
         setup()
     }
     
@@ -281,6 +302,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         self.fontSet = FontSet (font: FontSet.defaultFont)
         cellDimension = CellDimension(width: 1, height: 1)
         super.init (frame: frame)
+        isAccessibilityElement = true
+        accessibilityTraits.formUnion([.staticText, .causesPageTurn])
+        accessibilityTextualContext = .sourceCode
         setup()
     }
     
@@ -310,6 +334,26 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
 
 #if canImport(MetalKit)
+    /// Enables or disables GPU-accelerated rendering via Metal.
+    ///
+    /// When enabled, the terminal view replaces its CoreGraphics rendering
+    /// path with a Metal-based renderer that rasterizes glyphs into a
+    /// texture atlas and draws cells as GPU quads. This can significantly
+    /// reduce CPU usage for large or rapidly-updating terminals.
+    ///
+    /// Metal rendering is **disabled by default**. Call this method after
+    /// the view has been added to a window:
+    ///
+    /// ```swift
+    /// try terminalView.setUseMetal(true)
+    /// ```
+    ///
+    /// You can switch back to CoreGraphics at any time by passing `false`.
+    ///
+    /// - Parameter enabled: Pass `true` to activate Metal rendering, or
+    ///   `false` to revert to CoreGraphics.
+    /// - Throws: ``MetalError`` if the Metal device or pipeline cannot be
+    ///   initialized (for example, on hardware without Metal support).
     public func setUseMetal(_ enabled: Bool) throws {
         if enabled == useMetalRenderer {
             return
@@ -661,11 +705,19 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         contentOffset.y = max(0, CGFloat(lines) - bottomVisibleLine) * cellDimension.height
     }
     
+    /// Returns true when the user is holding Shift on an attached hardware keyboard
+    /// and the running application has not opted in to capturing shift via XTSHIFTESCAPE.
+    /// In that case the gesture should fall through to local selection handling instead
+    /// of being forwarded to the application as a mouse event.
+    private func shiftBypassesMouseReporting(for gestureRecognizer: UIGestureRecognizer) -> Bool {
+        gestureRecognizer.modifierFlags.contains(.shift) && !terminal.mouseShiftCapture
+    }
+
     @objc func singleTap (_ gestureRecognizer: UITapGestureRecognizer)
     {
         if isFirstResponder {
             guard gestureRecognizer.view != nil else { return }
-                 
+
             if gestureRecognizer.state != .ended {
                 return
             }
@@ -676,7 +728,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 return
             }
 
-            if allowMouseReporting && terminal.mouseMode.sendButtonPress() {
+            if allowMouseReporting && !shiftBypassesMouseReporting(for: gestureRecognizer) && terminal.mouseMode.sendButtonPress() {
                 sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: false)
 
                 if terminal.mouseMode.sendButtonRelease() {
@@ -708,12 +760,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     @objc func doubleTap (_ gestureRecognizer: UITapGestureRecognizer)
     {
         guard gestureRecognizer.view != nil else { return }
-               
+
         if gestureRecognizer.state != .ended {
             return
         }
-        
-        if allowMouseReporting && terminal.mouseMode.sendButtonPress() {
+
+        if allowMouseReporting && !shiftBypassesMouseReporting(for: gestureRecognizer) && terminal.mouseMode.sendButtonPress() {
             sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: false)
             
             if terminal.mouseMode.sendButtonRelease() {
@@ -738,7 +790,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             return
         }
 
-        if allowMouseReporting && terminal.mouseMode.sendButtonPress() {
+        if allowMouseReporting && !shiftBypassesMouseReporting(for: gestureRecognizer) && terminal.mouseMode.sendButtonPress() {
             sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: false)
 
             if terminal.mouseMode.sendButtonRelease() {
@@ -834,7 +886,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     
     @objc func panMouseHandler (_ gestureRecognizer: UIPanGestureRecognizer){
         guard gestureRecognizer.view != nil else { return }
-        if allowMouseReporting && terminal.mouseMode != .off {
+        if allowMouseReporting && !shiftBypassesMouseReporting(for: gestureRecognizer) && terminal.mouseMode != .off {
             switch gestureRecognizer.state {
             case .began:
                 // send the initial tap
@@ -1372,6 +1424,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             contentOffset = CGPoint(x: 0, y: targetY)
         }
     }
+
 #if canImport(MetalKit)
     func metalVisibleRange() -> ClosedRange<Int>? {
         let buffer = terminal.displayBuffer
@@ -1390,6 +1443,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         return firstRow...lastRow
     }
 #endif
+    
     var userScrolling = false
     private var isSyncingYDispFromScroll = false
     private var isUpdatingScrollViewFromYDisp = false
@@ -1531,6 +1585,31 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         }
     }
 
+    open override func accessibilityScroll(_ direction: UIAccessibilityScrollDirection) -> Bool {
+        let pageHeight = max(bounds.height, cellDimension.height)
+        let maxOffsetY = max(0, contentSize.height - bounds.height)
+        let targetOffsetY: CGFloat
+
+        switch direction {
+        case .down, .right, .next:
+            targetOffsetY = min(maxOffsetY, contentOffset.y + pageHeight)
+        case .up, .left, .previous:
+            targetOffsetY = max(0, contentOffset.y - pageHeight)
+        default:
+            return super.accessibilityScroll(direction)
+        }
+
+        guard targetOffsetY != contentOffset.y else {
+            return false
+        }
+
+        setContentOffset(CGPoint(x: contentOffset.x, y: targetOffsetY), animated: false)
+        setNeedsDisplay(bounds)
+        // Based on WWDC 2019 presentation: argument is nil
+        UIAccessibility.post(notification: .pageScrolled, argument: nil)
+        return true
+    }
+
     // iOS Keyboard input
     
     // UITextInputTraits
@@ -1566,37 +1645,65 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     public var hasText: Bool {
         return !textInputStorage.isEmpty
     }
-    func normalizedAutoPeriodReplacementText(_ text: String, oldText: Substring, rangeToReplace: TextRange) -> String? {
-        if text == ". " && pendingAutoPeriodDeleteWasSpace {
-            pendingAutoPeriodDeleteWasSpace = false
+
+    func isAutoPeriodReplacement(_ text: String) -> Bool {
+        text == "." || text == ". "
+    }
+
+    private func normalizedTextForPendingAutoPeriodDelete(_ text: String) -> String? {
+        switch text {
+        case ".":
+            // Some keyboards split auto-period into "." followed by " ".
+            return " "
+        case ". ":
             return "  "
+        default:
+            return nil
         }
-        guard text == ". " else { return nil }
+    }
+
+    func normalizedAutoPeriodReplacementText(_ text: String, oldText: Substring, rangeToReplace: TextRange) -> String? {
+        if pendingAutoPeriodDeleteWasSpace, let normalized = normalizedTextForPendingAutoPeriodDelete(text) {
+            pendingAutoPeriodDeleteWasSpace = false
+            uitiLog("auto-period replacement pending text:\(text.debugDescription) -> \(normalized.debugDescription)")
+            return normalized
+        }
+        guard isAutoPeriodReplacement(text) else { return nil }
         guard rangeToReplace.endPosition.offset == textInputStorage.count else { return nil }
         guard oldText.count <= 2 else { return nil }
         guard oldText.allSatisfy({ $0 == " " }) else { return nil }
+        if text == "." {
+            let normalized = oldText.count == 1 ? " " : String(oldText)
+            uitiLog("auto-period replacement range text:\(text.debugDescription) old:\(String(oldText).debugDescription) -> \(normalized.debugDescription)")
+            return normalized
+        }
         if oldText.count == 1 {
+            uitiLog("auto-period replacement range text:\(text.debugDescription) old:\(String(oldText).debugDescription) -> \"  \"")
             return "  "
         }
+        uitiLog("auto-period replacement range text:\(text.debugDescription) old:\(String(oldText).debugDescription) -> \(String(oldText).debugDescription)")
         return String(oldText)
     }
 
     private func normalizedAutoPeriodInsertionText(_ text: String, rangeToReplace: TextRange, hadPendingAutoPeriodDelete: Bool) -> String? {
-        guard text == ". " else { return nil }
-        if hadPendingAutoPeriodDelete {
+        guard isAutoPeriodReplacement(text) else { return nil }
+        if hadPendingAutoPeriodDelete, let normalized = normalizedTextForPendingAutoPeriodDelete(text) {
             pendingAutoPeriodDeleteWasSpace = false
-            return "  "
+            uitiLog("auto-period insertion pending text:\(text.debugDescription) -> \(normalized.debugDescription)")
+            return normalized
         }
         pendingAutoPeriodDeleteWasSpace = false
+        guard text == ". " else { return nil }
         guard rangeToReplace.isEmpty else { return nil }
         guard rangeToReplace.endPosition.offset == textInputStorage.count else { return nil }
         guard textInputStorage.last == " " else { return nil }
+        uitiLog("auto-period insertion range text:\(text.debugDescription) -> \" \"")
         return " "
     }
 
     private func commitTextInput(_ text: String, applyModifiers: Bool) {
         let hadPendingAutoPeriodDelete = pendingAutoPeriodDeleteWasSpace
-        if text != ". " {
+        if !isAutoPeriodReplacement(text) {
             pendingAutoPeriodDeleteWasSpace = false
         }
 
@@ -1610,6 +1717,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         var textToInsert = text
         if let normalized = normalizedAutoPeriodInsertionText(text, rangeToReplace: rangeToReplace, hadPendingAutoPeriodDelete: hadPendingAutoPeriodDelete) {
             textToInsert = normalized
+        }
+        if textToInsert != text {
+            uitiLog("commitTextInput normalized:\(text.debugDescription) -> \(textToInsert.debugDescription)")
         }
 
         let rangeStartIndex = rangeToReplace.startPosition.offset
@@ -1650,7 +1760,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         Soft keyboard input. Hardware keyboard text input is delivered here; special keys are handled in pressesBegan.
     */
     open func insertText(_ text: String) {
-        //uitiLog("insertText(\(text.debugDescription)) \(textInputStateDescription())")
+        uitiLog("insertText(\(text.debugDescription)) \(textInputStateDescription())")
         commitTextInput(text, applyModifiers: true)
     }
     private func kittyEncoder() -> KittyKeyboardEncoder {
@@ -2131,6 +2241,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
 
     func ensureCaretIsVisible ()
     {
+        // Suppress during sync blocks and inter-block gaps.
+        guard !terminal.synchronizedOutputActive && !inSyncSequence else { return }
         let displayBuffer = terminal.displayBuffer
         // Scroll to the bottom (where the caret is)
         userScrolling = false
@@ -2755,6 +2867,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     public func clipboardCopy(source: Terminal, content: Data) {
         terminalDelegate?.clipboardCopy(source: self, content: content)
     }
+    
+    public func clipboardRead(source: Terminal) -> Data? {
+        return terminalDelegate?.clipboardRead(source: self)
+    }
 
     public func iTermContent (source: Terminal, content: ArraySlice<UInt8>) {
         terminalDelegate?.iTermContent(source: self, content: content)
@@ -2774,7 +2890,234 @@ extension TerminalViewDelegate {
     
     public func iTermContent (source: TerminalView, content: ArraySlice<UInt8>) {
     }
+    
+    public func clipboardCopy(source: TerminalView, content: Data) {
+    }
+    
+    public func clipboardRead(source: TerminalView) -> Data? {
+        return nil
+    }
 }
+
+extension TerminalView: UIAccessibilityReadingContent {
+    private func accessibilityBaseAttributes() -> [NSAttributedString.Key: Any] {
+        getAttributes(CharData.defaultAttr, withUrl: false) ?? [.font: fontSet.normal]
+    }
+
+    private func accessibilityAttributedLine(_ row: Int, endCol: Int = -1) -> NSAttributedString {
+        guard row >= 0, row < terminal.displayBuffer.lines.count else {
+            return NSAttributedString(string: "")
+        }
+
+        let line = terminal.displayBuffer.lines[row]
+        let rawLimit = endCol == -1 ? line.count : min(endCol, line.count)
+        let lineLimit = min(rawLimit, line.getTrimmedLength())
+        guard line.hasAnyContent(), lineLimit > 0 else {
+            return NSAttributedString(string: "")
+        }
+
+        let lineInfo = buildAttributedString(row: row, line: line, cols: lineLimit)
+        let result = NSMutableAttributedString()
+        for segment in lineInfo.segments {
+            result.append(segment.attributedString)
+        }
+        return result
+    }
+
+    private func accessibilityAttributedDisplayText(start: Position, end: Position) -> NSAttributedString {
+        let buffer = terminal.displayBuffer
+        guard !buffer.lines.isEmpty else {
+            return NSAttributedString(string: "")
+        }
+
+        var start = start
+        var end = end
+
+        switch Position.compare(start, end) {
+        case .equal:
+            return NSAttributedString(string: "")
+        case .after:
+            swap(&start, &end)
+        case .before:
+            break
+        }
+
+        guard start.row >= 0, start.row <= buffer.lines.count else {
+            return NSAttributedString(string: "")
+        }
+
+        if end.row >= buffer.lines.count {
+            end.row = buffer.lines.count - 1
+        }
+
+        let newline = NSAttributedString(string: "\n", attributes: accessibilityBaseAttributes())
+        var lines: [NSMutableAttributedString] = [NSMutableAttributedString()]
+        var currentLine = lines[0]
+        var blanks: [NSMutableAttributedString] = []
+
+        func addBlanks() {
+            guard !blanks.isEmpty else {
+                return
+            }
+            for blank in blanks {
+                lines.append(blank)
+            }
+            currentLine = blanks.last!
+            blanks.removeAll()
+        }
+
+        var bufferLine = buffer.lines[start.row]
+        if bufferLine.hasAnyContent() {
+            currentLine.append(accessibilityAttributedLine(start.row, endCol: start.row < end.row ? -1 : end.col))
+        }
+
+        var line = start.row + 1
+        var isWrapped = false
+        while line < end.row {
+            bufferLine = buffer.lines[line]
+            isWrapped = bufferLine.isWrapped
+
+            if bufferLine.hasAnyContent() {
+                addBlanks()
+
+                if !isWrapped {
+                    currentLine = NSMutableAttributedString()
+                    lines.append(currentLine)
+                }
+
+                currentLine.append(accessibilityAttributedLine(line))
+            } else {
+                if !isWrapped || blanks.isEmpty {
+                    blanks.append(NSMutableAttributedString())
+                }
+            }
+
+            line += 1
+        }
+
+        if end.row != start.row {
+            bufferLine = buffer.lines[end.row]
+            if bufferLine.hasAnyContent() {
+                addBlanks()
+
+                isWrapped = bufferLine.isWrapped
+                if !isWrapped {
+                    currentLine = NSMutableAttributedString()
+                    lines.append(currentLine)
+                }
+
+                currentLine.append(accessibilityAttributedLine(end.row, endCol: end.col))
+            }
+        }
+
+        let result = NSMutableAttributedString()
+        for (index, attributedLine) in lines.enumerated() {
+            if index > 0 {
+                result.append(newline)
+            }
+            result.append(attributedLine)
+        }
+        return result
+    }
+
+    public func accessibilityLineNumber(for point: CGPoint) -> Int {
+        return Int(floor(max(point.y,0) / cellDimension.height))
+    }
+    
+    func startingLine(forLineNumber lineNumber: Int) -> Int {
+        let lineWidth = terminal.buffer.lines[lineNumber].count
+        var startingLine = lineNumber
+        while startingLine >= 1 {
+            startingLine -= 1
+            if terminal.buffer.lines[startingLine + 1].isWrapped {
+                continue
+            }
+            let start = Position(col: 0, row: startingLine)
+            let end = Position(col: terminal.buffer.lines[startingLine].count, row: startingLine)
+            let text =  terminal.getDisplayText(start: start, end: end)
+            if (text.count != terminal.buffer.lines[startingLine].count || text.last != " ") {
+                // previous line is incomplete. Don't use it
+                startingLine += 1
+                break
+            }
+        }
+        return startingLine
+    }
+
+    func endingLine(forLineNumber lineNumber: Int) -> Int {
+        let lineWidth = terminal.buffer.lines[lineNumber].count
+        var endingLine = lineNumber
+        while (endingLine < terminal.buffer.lines.count - 1) {
+            let start = Position(col: 0, row: endingLine)
+            let end = Position(col: terminal.buffer.lines[endingLine].count, row: endingLine)
+            let text =  terminal.getDisplayText(start: start, end: end)
+            if (text.count != terminal.buffer.lines[endingLine].count || text.last != " ")
+            && !terminal.buffer.lines[endingLine + 1].isWrapped {
+                // this line is incomplete. We stop here.
+                break
+            }
+            endingLine += 1
+        }
+        return endingLine
+    }
+
+    public func accessibilityContent(forLineNumber lineNumber: Int) -> String? {
+        var startingLine = startingLine(forLineNumber: lineNumber)
+        var endingLine = endingLine(forLineNumber: lineNumber)
+        let start = Position(col: 0, row: startingLine)
+        let end = Position(col: terminal.buffer.lines[endingLine].count,
+                           row: endingLine)
+        var text =  terminal.getDisplayText(start: start, end: end)
+        return terminal.getDisplayText(start: start, end: end)
+    }
+
+    public func accessibilityFrame(forLineNumber lineNumber: Int) -> CGRect {
+        let topVisibleLine = Int(contentOffset.y/cellDimension.height)
+        let offset = contentOffset.y - CGFloat(topVisibleLine) * cellDimension.height
+        var startingLine = startingLine(forLineNumber: lineNumber)
+        var endingLine = endingLine(forLineNumber: lineNumber)
+        var verticalWidth = CGFloat(endingLine - startingLine + 1)
+        let lineOffset =  cellDimension.height * CGFloat (startingLine - topVisibleLine + 1)
+        let lineOrigin = CGPoint(x: 0, y: lineOffset)
+        let columnCount = terminal.buffer.lines[lineNumber].count
+        var rect = CGRect(
+            x: lineOrigin.x,
+            y: lineOrigin.y + 3 - offset,
+            width: CGFloat(columnCount) * cellDimension.width,
+            height: verticalWidth * cellDimension.height)
+        return rect
+    }
+
+    public func accessibilityPageContent() -> String? {
+        let pageHeight = max(bounds.height, cellDimension.height)
+        let lines = Int(floor(pageHeight/cellDimension.height))
+        let startLine = Int(floor(contentOffset.y / cellDimension.height))
+        let start = Position(col: 0, row: startLine)
+        let end = Position(col: terminal.buffer.lines[startLine].count,
+                           row: startLine + lines)
+        return terminal.getDisplayText(start: start, end: end)
+    }
+
+    public func accessibilityAttributedContent(forLineNumber lineNumber: Int) -> NSAttributedString? {
+        var startingLine = startingLine(forLineNumber: lineNumber)
+        var endingLine = endingLine(forLineNumber: lineNumber)
+        var start = Position(col: 0, row: startingLine)
+        var end = Position(col: terminal.buffer.lines[endingLine].count,
+                           row: endingLine)
+        return accessibilityAttributedDisplayText(start: start, end: end)
+    }
+
+    public func accessibilityAttributedPageContent() -> NSAttributedString? {
+        let pageHeight = max(bounds.height, cellDimension.height)
+        let lines = Int(floor(pageHeight/cellDimension.height))
+        let startLine = Int(floor(contentOffset.y / cellDimension.height))
+        let start = Position(col: 0, row: startLine)
+        let end = Position(col: terminal.buffer.lines[startLine].count,
+                           row: startLine + lines)
+        return accessibilityAttributedDisplayText(start: start, end: end)
+    }
+}
+
 
 #if canImport(UIKit) && DEBUG
 #Preview {

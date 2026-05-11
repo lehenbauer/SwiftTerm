@@ -21,14 +21,23 @@ public final class BufferLine: CustomDebugStringConvertible {
         /// Renders the bottom of a character, using two cells
         case doubledDown
     }
-    var isWrapped: Bool
-    var renderMode: RenderLineMode = .single
+    var isWrapped: Bool { didSet { bump() } }
+    var renderMode: RenderLineMode = .single { didSet { bump() } }
     private var data: UnsafeMutableBufferPointer<CharData>
     private var dataSize: Int
 
     private var fillCharacter: CharData //used to initialise data
 
-    var images: [TerminalImage]?
+    var images: [TerminalImage]? { didSet { bump() } }
+
+    /// Monotonically increasing counter incremented on every mutation of this line's
+    /// contents (cells, isWrapped, renderMode, images). Renderers that cache per-line
+    /// draw state can compare this counter against a cached value to detect in-place
+    /// changes without diffing individual cells.
+    public private(set) var generation: UInt64 = 0
+
+    @inline(__always)
+    private func bump() { generation &+= 1 }
 
     public init (cols: Int, fillData: CharData? = nil, isWrapped: Bool = false)
     {
@@ -48,7 +57,14 @@ public final class BufferLine: CustomDebugStringConvertible {
         images = other.images
         let otherSize = other.dataSize
         let buf = UnsafeMutableBufferPointer<CharData>.allocate(capacity: otherSize)
+        #if os(Linux) || os(Windows)
+        for i in 0..<otherSize {
+            buf.initializeElement(at: i, to: other.data[i])
+        }
+        #else
         _ = buf.initialize(fromContentsOf: other.data[0..<otherSize])
+        #endif
+        
         data = buf
         dataSize = otherSize
     }
@@ -90,6 +106,7 @@ public final class BufferLine: CustomDebugStringConvertible {
             } else {
                 data[index] = value
             }
+            bump()
         }
     }
 
@@ -102,6 +119,7 @@ public final class BufferLine: CustomDebugStringConvertible {
         let empty = CharData(attribute: attribute)
         data.update(repeating: empty)
         images = nil
+        bump()
     }
     /// Test whether contains any chars.
     public func hasContent (index: Int) -> Bool {
@@ -139,6 +157,7 @@ public final class BufferLine: CustomDebugStringConvertible {
                 data [i] = fillData
             }
         }
+        bump()
     }
 
     /// Removes the cells at the specified position, shifting data leftwards
@@ -158,6 +177,7 @@ public final class BufferLine: CustomDebugStringConvertible {
                 data [i] = fillData
             }
         }
+        bump()
     }
 
     /// Replaces the cells in the start to end range with the specified fill data
@@ -169,6 +189,7 @@ public final class BufferLine: CustomDebugStringConvertible {
             data [idx] = fillData
             idx += 1
         }
+        bump()
     }
 
     /// Resizes the buffer line, if the new size is larger, the empty region is filled with
@@ -179,13 +200,24 @@ public final class BufferLine: CustomDebugStringConvertible {
         if len == cols {
             return
         }
+        defer { bump() }
 
         if cols > len {
             let newBuf = UnsafeMutableBufferPointer<CharData>.allocate(capacity: cols)
+            
             // Copy existing data
+#if os(Linux) || os(Windows)
+            if len > 0 {
+                for i in 0..<len {
+                    newBuf.initializeElement(at: i, to: data[i])
+                }
+            }
+#else
             if len > 0 {
                 _ = newBuf.initialize(fromContentsOf: data[0..<len])
             }
+#endif
+            
             // Fill remainder with fillData
             for i in len..<cols {
                 newBuf.initializeElement(at: i, to: fillData)
@@ -196,7 +228,13 @@ public final class BufferLine: CustomDebugStringConvertible {
         } else {
             if cols > 0 {
                 let newBuf = UnsafeMutableBufferPointer<CharData>.allocate(capacity: cols)
+#if os(Linux) || os(Windows)
+                for i in 0..<cols {
+                    newBuf.initializeElement(at: i, to: data[i])
+                }
+#else
                 _ = newBuf.initialize(fromContentsOf: data[0..<cols])
+#endif
                 data.deinitialize()
                 data.deallocate()
                 data = newBuf
@@ -214,6 +252,7 @@ public final class BufferLine: CustomDebugStringConvertible {
     public func fill (with: CharData)
     {
         data.update(repeating: with)
+        bump()
     }
 
     /// Fills the specified region of the bufferline with the specified ``CharData``
@@ -226,6 +265,7 @@ public final class BufferLine: CustomDebugStringConvertible {
         for i in 0..<len {
             data [i+atCol] = with
         }
+        bump()
     }
 
     /// Fills the current BufferLine with the contents of another BufferLine.
@@ -236,7 +276,13 @@ public final class BufferLine: CustomDebugStringConvertible {
             data.deinitialize()
             data.deallocate()
             let newBuf = UnsafeMutableBufferPointer<CharData>.allocate(capacity: srcSize)
+#if os(Linux) || os(Windows)
+            for i in 0..<srcSize {
+                newBuf.initializeElement(at: i, to: line.data[i])
+            }
+#else
             _ = newBuf.initialize(fromContentsOf: line.data[0..<srcSize])
+#endif
             data = newBuf
         } else {
             for i in 0..<srcSize {
@@ -245,6 +291,7 @@ public final class BufferLine: CustomDebugStringConvertible {
         }
         dataSize = srcSize
         isWrapped = line.isWrapped
+        bump()
     }
 
     /// Returns the trimmed length in terms of cells used from the BufferLine
@@ -282,6 +329,7 @@ public final class BufferLine: CustomDebugStringConvertible {
                 data[dstCol + i] = src.data[srcCol + i]
             }
         }
+        bump()
     }
 
     /// Returns the contents of the line as a string in the specified range

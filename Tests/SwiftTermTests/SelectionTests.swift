@@ -7,6 +7,9 @@
 
 import Foundation
 import Testing
+#if os(macOS)
+import AppKit
+#endif
 
 @testable import SwiftTerm
 
@@ -109,6 +112,25 @@ final class SelectionTests: TerminalDelegate {
         view.send(txt: "x")
         #expect(terminal.displayBuffer.yDisp == terminal.displayBuffer.yBase)
         #expect(!terminal.userScrolling)
+    }
+
+    @Test func testZeroSizedResizeDoesNotChangeTerminalDimensions() {
+        let view = TerminalView(frame: CGRect(origin: .zero, size: .init(width: 320, height: 160)))
+        let originalCols = view.terminal.cols
+        let originalRows = view.terminal.rows
+
+        let changed = view.processSizeChange(newSize: .zero)
+
+        #expect(!changed)
+        #expect(view.terminal.cols == originalCols)
+        #expect(view.terminal.rows == originalRows)
+    }
+
+    @Test func testScrollerStyleDefaultsToSystemPreference() {
+        let view = TerminalView(frame: CGRect(origin: .zero, size: .init(width: 120, height: 80)))
+
+        #expect(view.followsSystemScrollerStyle)
+        #expect(view.scrollerStyle == NSScroller.preferredScrollerStyle)
     }
 #endif
 

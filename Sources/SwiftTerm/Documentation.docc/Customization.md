@@ -191,8 +191,13 @@ Key options:
 | `kittyImageCacheLimitBytes` | 320 MB | Memory limit for Kitty image cache |
 | `ansi256PaletteStrategy` | `.base16Lab` | 256-color palette generation strategy |
 
-The `.base16Lab` strategy is based on the palette-generation write-up by
+The `.base16Lab` and `.base16LabHarmonious` strategies are based on the
+palette-generation write-up by
 [Jake Stewart](https://gist.github.com/jake-stewart/0a8ea46159a7da2c808e5be2177e1783).
+
+Use `.base16Lab` to keep the generated cube and grayscale ramp ordered dark to
+light even on light themes. Use `.base16LabHarmonious` to preserve the theme's
+native background-to-foreground direction instead.
 
 ## Rendering Options
 
@@ -206,6 +211,25 @@ terminalView.antiAliasCustomBlockGlyphs = true
 
 // Use bright colors for bold text (traditional terminal behavior)
 terminalView.useBrightColors = true
+```
+
+### GPU-Accelerated Rendering
+
+On macOS, iOS, and visionOS, you can switch to a Metal-based rendering path
+that offloads drawing to the GPU. See <doc:GPURendering> for full details.
+
+```swift
+// Enable Metal rendering
+try terminalView.setUseMetal(true)
+
+// Choose a buffering strategy
+terminalView.metalBufferingMode = .perRowPersistent   // default
+terminalView.metalBufferingMode = .perFrameAggregated // for full-screen TUIs
+
+// Check current renderer
+if terminalView.isUsingMetalRenderer {
+    print("GPU rendering active")
+}
 ```
 
 ## Search

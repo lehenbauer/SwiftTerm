@@ -202,6 +202,21 @@ public protocol TerminalDelegate: AnyObject {
     func clipboardCopy(source: Terminal, content: Data)
     
     /**
+     * This method is invoked when the client application has issued an OSC 52
+     * query to read the clipboard contents.
+     *
+     * Returning the clipboard data allows the terminal application to read it;
+     * returning `nil` denies the request.  The host may use this callback to
+     * prompt the user for confirmation before providing clipboard data.
+     *
+     * The default implementation returns `nil` (denying the request for security).
+     *
+     * - Parameter source: identifies the instance of the terminal that sent this request
+     * - Returns: the current clipboard contents, or `nil` to deny the request
+     */
+    func clipboardRead(source: Terminal) -> Data?
+    
+    /**
      * Invoked when client application issues OSC 777 to show notification.
      *
      * The default implementation does nothing.
@@ -326,7 +341,7 @@ open class Terminal {
     public private(set) var buffer: Buffer
 
     private let synchronizedOutputTimeoutSeconds: TimeInterval = 1.0
-    private var synchronizedOutputActive: Bool = false
+    public private(set) var synchronizedOutputActive: Bool = false
     private var synchronizedOutputBuffer: Buffer?
     private var synchronizedOutputBufferIsAlternate: Bool = false
     private var synchronizedOutputTimeoutItem: DispatchWorkItem?
@@ -507,7 +522,7 @@ open class Terminal {
             tdel?.setForegroundColor(source: self, color: foregroundColor)
             settingFgColor = false
 
-            if options.ansi256PaletteStrategy == .base16Lab {
+            if options.ansi256PaletteStrategy != .xterm {
                 rebuildAnsiPalette(notifyDelegate: true)
             }
         }
@@ -522,7 +537,7 @@ open class Terminal {
             tdel?.setBackgroundColor(source: self, color: backgroundColor)
             settingBgColor = false
 
-            if options.ansi256PaletteStrategy == .base16Lab {
+            if options.ansi256PaletteStrategy != .xterm {
                 rebuildAnsiPalette(notifyDelegate: true)
             }
         }
@@ -623,6 +638,10 @@ open class Terminal {
             tdel?.mouseModeChanged (source: self)
         }
     }
+
+    /// Whether the running application has requested shift capture via XTSHIFTESCAPE (`CSI > 1 s`).
+    /// When `true`, shift+click is forwarded to the app instead of triggering local text selection.
+    public private(set) var mouseShiftCapture: Bool = false
 
     // The next four variables determine whether setting/querying should be done using utf8 or latin1
     // and whether the values should be set or queried using hex digits, rather than actual byte streams
@@ -853,7 +872,8 @@ open class Terminal {
         curAttr = CharData.defaultAttr
         
         mouseMode = .off
-        
+        mouseShiftCapture = false
+
         buffer.scrollTop = 0
         buffer.scrollBottom = rows-1
         buffer.marginLeft = 0
@@ -1270,6 +1290,15 @@ open class Terminal {
                 continue
             }
 
+            // When regionalIndicatorWidth is .narrow, override individual RI width to 1.
+            // The combining logic below will widen the pair to 2 when they form a flag.
+            let narrowRI = options.regionalIndicatorWidth == .narrow
+            if narrowRI, chWidth == 2,
+               let firstScalarForRI = ch.unicodeScalars.first,
+               UnicodeUtil.isRegionalIndicator(firstScalarForRI) {
+                chWidth = 1
+            }
+
             if let firstScalar = ch.unicodeScalars.first {
                 // Check if we should try to combine this character with the previous one.
                 // This applies to:
@@ -1294,12 +1323,37 @@ open class Terminal {
                         if lastChar.unicodeScalars.last?.value == 0x200D {
                             shouldTryCombine = true
                         }
-                        // Regional indicator combining: pair two RIs into a flag emoji
+                        // Regional indicator combining: pair two RIs into a flag emoji.
+                        // In narrow mode, require adjacency (buffer.x == last.x + 1) to
+                        // prevent wrong pairing when a cell is overwritten during partial
+                        // screen repaints from multiplexers.
                         else if UnicodeUtil.isRegionalIndicator(firstScalar),
+                                (!narrowRI || buffer.x == last.x + 1),
                                 lastChar.unicodeScalars.count == 1,
                                 let lastScalar = lastChar.unicodeScalars.first,
                                 UnicodeUtil.isRegionalIndicator(lastScalar) {
                             shouldTryCombine = true
+                        }
+                    }
+                }
+
+                // In narrow RI mode, fallback for combining when lastBufferStorage is
+                // stale (e.g. multiplexer interleaving output across lines).
+                // Check buffer.x - 1 on the current line for a standalone width-1 RI.
+                if narrowRI, !shouldTryCombine, UnicodeUtil.isRegionalIndicator(firstScalar) {
+                    let prevX = buffer.x - 1
+                    if prevX >= 0 {
+                        let currentY = buffer.y + buffer.yBase
+                        let currentLine = buffer.lines [currentY]
+                        let prevCell = currentLine [prevX]
+                        if prevCell.width == 1 {
+                            let prevChar = getCharacter(for: prevCell)
+                            if prevChar.unicodeScalars.count == 1,
+                               let prevScalar = prevChar.unicodeScalars.first,
+                               UnicodeUtil.isRegionalIndicator(prevScalar) {
+                                buffer.lastBufferStorage = (currentY, prevX, cols, rows)
+                                shouldTryCombine = true
+                            }
                         }
                     }
                 }
@@ -1344,6 +1398,12 @@ open class Terminal {
                                     if oldSize == 2 && buffer.x > 0 {
                                         buffer.x -= 1
                                     }
+                                } else if narrowRI && UnicodeUtil.isRegionalIndicator(firstScalar) && oldSize == 1 && lastx + 1 < cols {
+                                    // In narrow mode, two width-1 RIs combine into a width-2 flag.
+                                    updateCharData(&cd, char: newCh, size: 2)
+                                    let empty = makeCharData(attribute: cd.attribute, code: 0, size: 0)
+                                    existingLine [lastx + 1] = empty
+                                    buffer.x += 1
                                 } else {
                                     updateCharData(&cd, char: newCh, size: Int32 (cd.width))
                                     if cd.width != oldSize {
@@ -1523,8 +1583,7 @@ open class Terminal {
         let buffer = self.buffer
         let by = buffer.y
         
-        let canScroll = buffer.x >= buffer.marginLeft && buffer.x <= buffer.marginRight
-        
+        let canScroll = !marginMode || (buffer.x >= buffer.marginLeft && buffer.x <= buffer.marginRight)
         if by == buffer.scrollBottom {
             if canScroll {
                 scroll(isWrapped: false)
@@ -1727,23 +1786,42 @@ open class Terminal {
         }
     }
     
-    // Copy to clipboard with sequence on the form:
-    //    ESC ] 52 ; c ; [base64 data] \a
-    // where c is for copy and the only thing supported.
+    // OSC 52 – clipboard access
+    //    Write:  ESC ] 52 ; <sel> ; <base64-data> ST
+    //    Query:  ESC ] 52 ; <sel> ; ?            ST
+    //
+    // <sel> is one or more characters from {c, p, q, s, 0-7} that identify
+    // the selection/clipboard buffer.  On Apple platforms every selection maps
+    // to the system clipboard, so we accept any value.  An empty <sel> is
+    // treated as "c" (system clipboard).
     func oscClipboard (_ data: ArraySlice<UInt8>) {
-        // we require data to start with c; followed by base64 content
-        guard data.count >= 2,
-              data[data.startIndex] == UInt8(ascii: "c"),
-              data[data.startIndex+1] == UInt8(ascii: ";") else {
+        // Find the semicolon that separates the selection identifier from the payload.
+        guard let sepIdx = data.firstIndex(of: UInt8(ascii: ";")) else {
             return
         }
-        
-        let base64 = Data(data[(data.startIndex+2)...])
-        guard let content = Data(base64Encoded: base64) else {
-            return
+
+        let selectionSlice = data[data.startIndex..<sepIdx]
+        let selectionChars = selectionSlice.isEmpty
+            ? "c"
+            : (String(bytes: selectionSlice, encoding: .ascii) ?? "c")
+
+        let payload = data[(sepIdx + 1)...]
+
+        if payload.count == 1 && payload[payload.startIndex] == UInt8(ascii: "?") {
+            // Read / query – ask the delegate for clipboard contents.
+            guard let content = tdel?.clipboardRead(source: self) else {
+                return
+            }
+            let base64 = content.base64EncodedString()
+            sendResponse(cc.OSC, "52;\(selectionChars);\(base64)", cc.ST)
+        } else {
+            // Write – decode the base64 payload and hand it to the delegate.
+            let base64 = Data(payload)
+            guard let content = Data(base64Encoded: base64) else {
+                return
+            }
+            tdel?.clipboardCopy(source: self, content: content)
         }
-        
-        tdel?.clipboardCopy(source: self, content: content)
     }
     
     // Notifications:
@@ -2557,6 +2635,10 @@ open class Terminal {
 
     func cmdRestoreCursor (_ pars: [Int], _ collect: cstring)
     {
+        // CSI u (no intermediates) = DECRC (Restore Cursor)
+        // CSI > Ps u / CSI < u / CSI = Ps u = Kitty keyboard protocol (not cursor commands)
+        guard collect.isEmpty else { return }
+
         // Clamp savedX and savedY to valid ranges to prevent abort() in Debug builds.
         // Saved values can become invalid after resize/scroll operations.
         buffer.x = min(max(0, buffer.savedX), cols - 1)
@@ -2848,6 +2930,10 @@ open class Terminal {
         case refreshWindow
         /// Request that the size of the terminal be changed to the specified cols and rows
         case resizeTo(cols: Int, rows: Int)
+        /// Request that the size of the terminal be changed to the specified cols and rows.
+        /// Prefer this over `resizeTo(cols:rows:)` which cannot be disambiguated from
+        /// `resizeTo(lines:)` in switch statements due to a Swift compiler limitation.
+        case resizeTerminal(cols: Int, rows: Int)
         case restoreMaximizedWindow
         /// Attempt to maximize the window
         case maximizeWindow
@@ -2970,7 +3056,7 @@ open class Terminal {
         case [7]:
             tdel.windowCommand(source: self, command: .refreshWindow)
         case _ where pars.count == 3 && pars.first == 8:
-            tdel.windowCommand(source: self, command: .resizeTo(cols: pars [1], rows: pars [2]))
+            tdel.windowCommand(source: self, command: .resizeTerminal(cols: pars [1], rows: pars [2]))
         case [9, 0]:
             tdel.windowCommand(source: self, command: .restoreMaximizedWindow)
         case [9, 1]:
@@ -3071,6 +3157,8 @@ open class Terminal {
 
     func cmdSetMargins (_ pars: [Int], _ collect: cstring)
     {
+        guard collect.isEmpty else { return }
+
         var left = min (cols-1, max (0, (pars.count > 0 ? pars[0] : 1) - 1))
         let right = min (cols-1, max (0, (pars.count > 1 ? pars [1] : cols) - 1))
         
@@ -3086,6 +3174,10 @@ open class Terminal {
     //
     func cmdSaveCursor (_ pars: [Int], _ collect: cstring)
     {
+        // CSI s (no intermediates) = ANSI Save Cursor
+        // Sequences with intermediates (e.g. CSI > s) are not cursor commands
+        guard collect.isEmpty else { return }
+
         buffer.savedX = buffer.x
         buffer.savedY = buffer.y
         buffer.savedAttr = curAttr
@@ -4634,19 +4726,29 @@ open class Terminal {
         let p = min (max (pars.count == 0 ? 1 : pars [0], 1), rows)
         let da = CharData.defaultAttr
 
-        let row = buffer.scrollTop + buffer.yBase
+        if marginMode {
+            let row = buffer.scrollTop + buffer.yBase
 
-        let columnCount = buffer.marginRight-buffer.marginLeft+1
-        let rowCount = buffer.scrollBottom-buffer.scrollTop
-        for _ in 0..<p {
-            for i in (0..<rowCount).reversed() {
-                let src = buffer.lines [row+i]
-                let dst = buffer.lines [row+i+1]
-                
-                dst.copyFrom(src, srcCol: buffer.marginLeft, dstCol: buffer.marginLeft, len: columnCount)
+            let columnCount = buffer.marginRight-buffer.marginLeft+1
+            let rowCount = buffer.scrollBottom-buffer.scrollTop
+            for _ in 0..<p {
+                for i in (0..<rowCount).reversed() {
+                    let src = buffer.lines [row+i]
+                    let dst = buffer.lines [row+i+1]
+
+                    dst.copyFrom(src, srcCol: buffer.marginLeft, dstCol: buffer.marginLeft, len: columnCount)
+                }
+                let last = buffer.lines [row]
+                last.fill (with: CharData (attribute: da), atCol: buffer.marginLeft, len: columnCount)
             }
-            let last = buffer.lines [row]
-            last.fill (with: CharData (attribute: da), atCol: buffer.marginLeft, len: columnCount)
+        } else {
+            for _ in 0..<p {
+                buffer.lines.splice (start: buffer.yBase + buffer.scrollBottom, deleteCount: 1,
+                                     items: [], change: { line in updateRange (line)})
+                buffer.lines.splice (start: buffer.yBase + buffer.scrollTop, deleteCount: 0,
+                                     items: [buffer.getBlankLine (attribute: da)],
+                                     change: { line in updateRange (line) })
+            }
         }
         // this.maxRange();
         updateRange (startLine: buffer.scrollTop, endLine: buffer.scrollBottom)
@@ -5142,7 +5244,7 @@ open class Terminal {
         let newY = buffer.y + 1
 
         // When left/right margins are active, only scroll if cursor is within margins
-        let canScroll = buffer.x >= buffer.marginLeft && buffer.x <= buffer.marginRight
+        let canScroll = !marginMode || (buffer.x >= buffer.marginLeft && buffer.x <= buffer.marginRight)
 
         if newY > buffer.scrollBottom {
             if canScroll {
@@ -5225,6 +5327,7 @@ open class Terminal {
             if bottomRow == lines.count - 1 {
                 if willBufferBeTrimmed {
                     lines.recycle (clearAttribute: eraseAttr())
+                     lines[lines.count - 1].isWrapped = isWrapped
                 } else {
                     lines.push (BufferLine (from: newLine))
                 }
@@ -5659,6 +5762,19 @@ open class Terminal {
         }
     }
     
+    // XTSHIFTESCAPE (CSI > Ps s)
+    func cmdSetShiftEscape (_ pars: [Int]) {
+        let ps = pars.isEmpty ? 0 : pars[0]
+        switch ps {
+        case 0:
+            mouseShiftCapture = false
+        case 1:
+            mouseShiftCapture = true
+        default:
+            break
+        }
+    }
+
     /**
      * Encodes the button action in the format expected by the client
      * - Parameter button: The button to encode
@@ -5719,14 +5835,16 @@ open class Terminal {
         //print ("got \(mouseProtocol)")
         switch mouseProtocol {
         case .x10:
-            sendResponse(cc.CSI, "M", [UInt8(buttonFlags+32), min (UInt8(255), UInt8(32 + x+1)), min (UInt8(255), UInt8(32+y+1))])
+            sendResponse(cc.CSI, "M", [UInt8(min(buttonFlags+32, 255)), UInt8(min(32 + x+1, 255)), UInt8(min(32+y+1, 255))])
         case .sgr:
-            let bflags : Int = ((buttonFlags & 3) == 3) ? (buttonFlags & ~3) : buttonFlags
-            let m = ((buttonFlags & 3) == 3) ? "m" : "M"
+            let isRelease = (buttonFlags & 3) == 3 && (buttonFlags & 32) == 0
+            let bflags : Int = isRelease ? (buttonFlags & ~3) : buttonFlags
+            let m = isRelease ? "m" : "M"
             sendResponse(cc.CSI, "<\(bflags);\(x+1);\(y+1)\(m)")
         case .sgrPixel:
-            let bflags : Int = ((buttonFlags & 3) == 3) ? (buttonFlags & ~3) : buttonFlags
-            let m = ((buttonFlags & 3) == 3) ? "m" : "M"
+            let isRelease = (buttonFlags & 3) == 3 && (buttonFlags & 32) == 0
+            let bflags : Int = isRelease ? (buttonFlags & ~3) : buttonFlags
+            let m = isRelease ? "m" : "M"
             print ("\(pixelX);\(pixelY)")
             sendResponse(cc.CSI, "<\(bflags);\(pixelX);\(pixelY)\(m)")
             
@@ -5782,7 +5900,8 @@ open class Terminal {
         restrictCursor()
 
         // When left/right margins are active, only scroll if cursor is within margins
-        let canScroll = buffer.x >= buffer.marginLeft && buffer.x <= buffer.marginRight
+        let canScroll = !marginMode || (buffer.x >= buffer.marginLeft && buffer.x <= buffer.marginRight)
+        
 
         if buffer.y == buffer.scrollTop {
             if canScroll {
@@ -6812,6 +6931,10 @@ public extension TerminalDelegate {
     }
     
     func clipboardCopy(source: Terminal, content: Data) {
+    }
+    
+    func clipboardRead(source: Terminal) -> Data? {
+        return nil
     }
     
     func notify(source: Terminal, title: String, body: String) {
