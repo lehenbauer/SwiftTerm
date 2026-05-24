@@ -21,7 +21,7 @@ let SwiftTermUnderlineStyleKey = NSAttributedString.Key("SwiftTermUnderlineStyle
 
 #if os(iOS) || os(visionOS)
 import UIKit
-typealias TTColor = UIColor
+public typealias TTColor = UIColor
 typealias TTFont = UIFont
 typealias TTRect = CGRect
 typealias TTBezierPath = UIBezierPath
@@ -30,7 +30,7 @@ public typealias TTImage = UIImage
 
 #if os(macOS)
 import AppKit
-typealias TTColor = NSColor
+public typealias TTColor = NSColor
 typealias TTFont = NSFont
 typealias TTRect = CGRect
 typealias TTBezierPath = NSBezierPath
@@ -516,6 +516,9 @@ extension TerminalView {
         // Apply dim/faint attribute (SGR 2)
         if flags.contains (.dim) {
             fgColor = fgColor.dimmedColor (towards: bgColor)
+        }
+        if minimumContrast > 0 {
+            fgColor = adjustedForegroundForMinimumContrast(fgColor, against: bgColor, minimum: minimumContrast)
         }
         var nsattr: [NSAttributedString.Key:Any] = [
             .font: tf,

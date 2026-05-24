@@ -497,6 +497,56 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// Controls weather to use high ansi colors, if false terminal will use bold text instead of high ansi colors
     public var useBrightColors: Bool = true
 
+    /// Selects which built-in theme (`lightTheme` or `darkTheme`) the view
+    /// renders with, and whether to follow the system appearance. Default is
+    /// `.dark`, which preserves the legacy color behavior for any consumer
+    /// that never touches the new API — opting in is one line:
+    ///
+    ///     terminalView.terminalAppearance = .system
+    ///
+    /// When set to `.system`, the view re-resolves on
+    /// `viewDidChangeEffectiveAppearance()`. The first apply only happens when
+    /// this property is set (it is not invoked from init). Named with the
+    /// `terminal` prefix to avoid colliding with `NSView.appearance`.
+    public var terminalAppearance: TerminalAppearance = .dark {
+        didSet {
+            applyResolvedAppearance()
+        }
+    }
+
+    /// The theme used when the resolved appearance is light. Setting this
+    /// re-applies immediately if the currently-resolved appearance is light.
+    public var lightTheme: TerminalTheme = .swiftTermLight {
+        didSet {
+            if !resolvedIsDarkAppearance() {
+                applyResolvedAppearance()
+            }
+        }
+    }
+
+    /// The theme used when the resolved appearance is dark. Setting this
+    /// re-applies immediately if the currently-resolved appearance is dark.
+    public var darkTheme: TerminalTheme = .swiftTermDark {
+        didSet {
+            if resolvedIsDarkAppearance() {
+                applyResolvedAppearance()
+            }
+        }
+    }
+
+    /// Minimum perceptual lightness difference between a cell's foreground and
+    /// background, expressed as a fraction in `0...1` (internally scaled to the
+    /// 0…100 CIE L* range). When the rendered pair falls below the threshold,
+    /// the foreground is nudged darker or brighter at draw time. Default is
+    /// `0`, which is a no-op. Recommended for light themes: `0.3`.
+    public var minimumContrast: CGFloat = 0 {
+        didSet {
+            if minimumContrast != oldValue {
+                colorsChanged()
+            }
+        }
+    }
+
     /// When true, block element (U+2580-U+259F) and box drawing (U+2500-U+257F) characters use custom rendering.
     public var customBlockGlyphs: Bool = true {
         didSet {
@@ -707,6 +757,15 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     {
         self.nativeForegroundColor = NSColor.textColor
         self.nativeBackgroundColor = NSColor.textBackgroundColor
+    }
+
+    /// Re-resolve the active theme whenever the OS appearance flips, but only
+    /// when the host has opted into `terminalAppearance = .system`.
+    public override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        if case .system = terminalAppearance {
+            applyResolvedAppearance()
+        }
     }
     
     open func bufferActivated(source: Terminal) {
