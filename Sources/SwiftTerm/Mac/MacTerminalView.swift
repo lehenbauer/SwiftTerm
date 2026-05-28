@@ -17,6 +17,9 @@ import Carbon.HIToolbox
 #if canImport(MetalKit)
 import MetalKit
 #endif
+#if canImport(os)
+import os.log
+#endif
 
 /**
  * TerminalView provides an AppKit front-end to the `Terminal` termininal emulator.
@@ -113,26 +116,27 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     private var findBarOptions: SearchOptions = SearchOptions()
     var debug: TerminalDebugView?
     var pendingDisplay: Bool = false
-    /// Debounce timer for sync-end render — coalesces rapid sync block sequences.
-    var syncEndRenderTimer: DispatchWorkItem? = nil
-    /// True from first BSU until syncSequenceSettleMs after last ESU.
-    var inSyncSequence: Bool = false
-    /// Milliseconds to wait after the last ESU before rendering.
-    /// Terminal multiplexers deliver screen repaints as multiple BSU/ESU
-    /// pairs across separate I/O callbacks. This window lets the full
-    /// sequence arrive before rendering one atomic frame.
-    /// Note: tmux handles DEC 2026 internally, so this debounce only
-    /// affects applications sending BSU/ESU directly. The default of 16ms
-    /// (one frame at 60fps) is sufficient for natural I/O coalescing.
-    public var syncSequenceSettleMs: Int = 16
 #if canImport(MetalKit)
     var metalView: MTKView?
     var metalRenderer: MetalTerminalRenderer?
     /// Experimental GPU path: CoreText glyph atlas + Metal quads.
     /// Limitations: image caching is basic; GPU path is still evolving.
     private var useMetalRenderer = false
+    /// The NSWindow that the current `metalView`'s CAMetalLayer is bound to.
+    /// CAMetalLayer's binding to a window's WindowServer surface doesn't
+    /// survive being reparented across NSWindow instances — `present(_:)`
+    /// silently no-ops on the new window, leaving the terminal frozen on its
+    /// last frame. When `viewDidMoveToWindow` fires with a different window,
+    /// we rebuild the MTKView so a fresh CAMetalLayer binds to it.
+    private weak var metalBoundWindow: NSWindow?
     var metalDirtyRange: ClosedRange<Int>?
     var pendingMetalDisplay: Bool = false
+    /// The cursor position last submitted to the Metal renderer. Used to
+    /// detect pure cursor-only moves (no rows dirty) such as the
+    /// CSI Ps C / CSI Ps D sequences shells emit in response to Option+Arrow
+    /// word jumps, which would otherwise leave the cursor visually stuck
+    /// because `MTKView` is paused and only redraws on demand.
+    var lastRenderedCursor: (x: Int, y: Int, hidden: Bool)?
     /// Controls how the Metal renderer builds GPU buffers each frame.
     ///
     /// The default is ``MetalBufferingMode/perRowPersistent``, which caches
@@ -301,34 +305,21 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             guard let device = MTLCreateSystemDefaultDevice() else {
                 throw MetalError.deviceUnavailable
             }
-            let mtkView = MTKView(frame: bounds, device: device)
-            mtkView.autoresizingMask = [.width, .height]
-            mtkView.isPaused = true
-            mtkView.enableSetNeedsDisplay = true
-            mtkView.autoResizeDrawable = false
-            mtkView.framebufferOnly = true
-            mtkView.colorPixelFormat = .bgra8Unorm
+            let mtkView = makeMetalView(frame: bounds, device: device)
             let renderer = try MetalTerminalRenderer(view: mtkView, terminalView: self)
             mtkView.delegate = renderer
-            if let scroller = scroller {
-                addSubview(mtkView, positioned: .below, relativeTo: scroller)
-            } else if let caretView = caretView {
-                addSubview(mtkView, positioned: .below, relativeTo: caretView)
-            } else {
-                addSubview(mtkView, positioned: .below, relativeTo: nil)
-            }
-            if let caretView = caretView {
-                caretView.disableAnimations()
-                caretView.isHidden = true
-            }
+            insertMetalView(mtkView, replacing: nil)
             metalView = mtkView
             metalRenderer = renderer
+            metalBoundWindow = window
             needsDisplay = false
             mtkView.setNeedsDisplay(mtkView.bounds)
         } else {
+            metalView?.delegate = nil
             metalView?.removeFromSuperview()
             metalView = nil
             metalRenderer = nil
+            metalBoundWindow = nil
             if let caretView = caretView {
                 caretView.isHidden = false
                 caretView.updateCursorStyle()
@@ -340,8 +331,131 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     func metalRenderingScaleFactor() -> CGFloat {
         max(1, metalScaleFactorOverride ?? backingScaleFactor())
     }
+
+    /// Builds an MTKView configured for terminal rendering. Used by both
+    /// initial Metal enablement and `rebindMetalRendererToWindow` so the two
+    /// paths can never drift out of sync on MTKView configuration.
+    private func makeMetalView(frame: CGRect, device: MTLDevice) -> MTKView {
+        let mtkView = MTKView(frame: frame, device: device)
+        mtkView.autoresizingMask = [.width, .height]
+        mtkView.isPaused = true
+        mtkView.enableSetNeedsDisplay = true
+        mtkView.autoResizeDrawable = false
+        mtkView.framebufferOnly = true
+        mtkView.colorPixelFormat = .bgra8Unorm
+        // Tag the metal layer with sRGB so the compositor color-manages our
+        // pixels the same way it color-manages the layer-backed NSView
+        // (whose backing store is in the display colorspace). Without this,
+        // CAMetalLayer is untagged and our raw bytes are treated as
+        // already-in-display-gamut, producing oversaturated colors on
+        // wide-gamut displays — most visible on selection highlights and
+        // any non-default cell backgrounds. NSColor components resolved via
+        // `usingColorSpace(.deviceRGB)` are sRGB-encoded on modern macOS,
+        // so this is the colorspace they actually live in.
+        if let metalLayer = mtkView.layer as? CAMetalLayer {
+            metalLayer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
+        }
+        return mtkView
+    }
+
+    /// Inserts the Metal view into the view hierarchy with the correct
+    /// z-order: below the caret (which is hidden while Metal owns the
+    /// cursor), with the scroller above it. When there is no caret view
+    /// and `replacing` is non-nil, the new view takes the old one's
+    /// z-position instead. Actually removing the old view is the caller's
+    /// responsibility — the rebind path defers removal until after the new
+    /// view has drawn its first frame so the hierarchy is never empty.
+    private func insertMetalView(_ newView: MTKView, replacing oldView: MTKView?) {
+        if let caretView = caretView {
+            addSubview(newView, positioned: .below, relativeTo: caretView)
+            caretView.disableAnimations()
+            caretView.isHidden = true
+        } else if let oldView = oldView {
+            addSubview(newView, positioned: .above, relativeTo: oldView)
+        } else {
+            addSubview(newView, positioned: .below, relativeTo: nil)
+        }
+        if let scroller = scroller {
+            addSubview(scroller, positioned: .above, relativeTo: newView)
+        }
+    }
+
+    /// Swaps in a fresh MTKView (and therefore a fresh CAMetalLayer) bound
+    /// to the current window's CAContext.
+    ///
+    /// CAMetalLayer's WindowServer binding does not survive being reparented
+    /// across NSWindow instances. After the reparent, `present(_:)` silently
+    /// no-ops on the new window and the terminal stays frozen on its last
+    /// frame. Apple exposes no public API to rebind an existing layer to a
+    /// new context, so the only reliable fix is to recreate the MTKView.
+    ///
+    /// To avoid the visible CoreGraphics-fallback flash that a naive
+    /// disable/enable toggle produces, the new view is built and inserted
+    /// before the old one is removed, and we force a synchronous draw plus a
+    /// belt-and-braces `setNeedsDisplay` so the new layer has content the
+    /// moment it is in the hierarchy.
+    ///
+    /// On failure (renderer init throws), we fall back to CoreGraphics
+    /// rendering rather than leaving a frozen Metal view in place — a
+    /// degraded but responsive terminal beats a dead one.
+    private func rebindMetalRendererToWindow(_ targetWindow: NSWindow) {
+        guard useMetalRenderer, let oldView = metalView else { return }
+        // Reuse the old view's MTLDevice when possible so we don't churn
+        // GPUs unnecessarily on multi-GPU or eGPU setups.
+        guard let device = oldView.device ?? MTLCreateSystemDefaultDevice() else {
+            disableMetalRendererAfterRebindFailure(error: MetalError.deviceUnavailable)
+            return
+        }
+
+        let newView = makeMetalView(frame: oldView.frame, device: device)
+
+        let newRenderer: MetalTerminalRenderer
+        do {
+            newRenderer = try MetalTerminalRenderer(view: newView, terminalView: self)
+        } catch {
+            disableMetalRendererAfterRebindFailure(error: error)
+            return
+        }
+        newView.delegate = newRenderer
+
+        // Critical sequence: the new layer must have visible content before
+        // the old view is removed. Force a synchronous draw, plus a
+        // `setNeedsDisplay` belt-and-braces in case the synchronous draw bails
+        // out (e.g. the new layer hasn't acquired its first drawable yet).
+        insertMetalView(newView, replacing: oldView)
+        newView.draw()
+        newView.setNeedsDisplay(newView.bounds)
+
+        oldView.delegate = nil
+        oldView.removeFromSuperview()
+
+        metalView = newView
+        metalRenderer = newRenderer
+        metalBoundWindow = targetWindow
+    }
+
+    /// Tears down the Metal renderer and reverts to CoreGraphics rendering
+    /// after an unrecoverable rebind failure. Keeps the terminal usable when
+    /// the GPU path can't be restored.
+    private func disableMetalRendererAfterRebindFailure(error: Error) {
+#if canImport(os)
+        os_log("SwiftTerm: Metal renderer rebind failed; falling back to CoreGraphics: %{public}@",
+               type: .error, String(describing: error))
 #endif
-    
+        metalView?.delegate = nil
+        metalView?.removeFromSuperview()
+        metalView = nil
+        metalRenderer = nil
+        metalBoundWindow = nil
+        useMetalRenderer = false
+        if let caretView = caretView {
+            caretView.isHidden = false
+            caretView.updateCursorStyle()
+        }
+        needsDisplay = true
+    }
+#endif
+
     func startDisplayUpdates ()
     {
         // Not used on Mac
@@ -635,8 +749,8 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     }
 
     func getScrollerFrame() -> CGRect {
-        let scrollerWidth = NSScroller.scrollerWidth(for: .regular, scrollerStyle: scrollerStyle)
-        return NSRect(x: bounds.maxX - scrollerWidth, y: 0, width: scrollerWidth, height: bounds.height)
+        let width = reservedScrollerWidth
+        return NSRect(x: bounds.maxX - width, y: 0, width: width, height: bounds.height)
     }
 
     func setupScroller()
@@ -780,17 +894,21 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         NSScroller.scrollerWidth(for: .regular, scrollerStyle: scrollerStyle)
     }
 
+    private var reservedScrollerWidth: CGFloat {
+        scroller?.isHidden == true ? 0 : scrollerWidth
+    }
+
     /**
      * Given the current set of columns and rows returns a frame that would host this control.
      */
     open func getOptimalFrameSize () -> NSRect
     {
-        return NSRect (x: 0, y: 0, width: cellDimension.width * CGFloat(terminal.cols) + scrollerWidth, height: cellDimension.height * CGFloat(terminal.rows))
+        return NSRect (x: 0, y: 0, width: cellDimension.width * CGFloat(terminal.cols) + reservedScrollerWidth, height: cellDimension.height * CGFloat(terminal.rows))
     }
 
     func getEffectiveWidth (size: CGSize) -> CGFloat
     {
-        return (size.width - scrollerWidth)
+        max(0, size.width - reservedScrollerWidth)
     }
     
     open func scrolled(source terminal: Terminal, yDisp: Int) {
@@ -891,7 +1009,12 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
 
     open override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        guard window != nil else { return }
+        guard let currentWindow = window else { return }
+#if canImport(MetalKit)
+        if useMetalRenderer, currentWindow !== metalBoundWindow {
+            rebindMetalRendererToWindow(currentWindow)
+        }
+#endif
         refreshScrollerStyle()
         updateScroller()
     }
@@ -2654,8 +2777,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     
     func ensureCaretIsVisible ()
     {
-        // Suppress during sync blocks and inter-block gaps.
-        guard !terminal.synchronizedOutputActive && !inSyncSequence else { return }
+        guard !terminal.synchronizedOutputActive else { return }
         let displayBuffer = terminal.displayBuffer
         let realCaret = displayBuffer.y + displayBuffer.yBase
         let viewportEnd = displayBuffer.yDisp + displayBuffer.rows
