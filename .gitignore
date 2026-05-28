@@ -11,3 +11,5 @@ DerivedData
 .DS_Store
 *~
 esctest/
+.gitnexus
+.claude
