@@ -77,5 +77,13 @@ final class TerminalViewCursorTests {
         #expect(MetalTerminalRenderer.inactiveCursorOutlineThickness(scale: 1) == 1.5)
         #expect(MetalTerminalRenderer.inactiveCursorOutlineThickness(scale: 2) == 3)
     }
+
+    @Test func testDarkThemeUsesContrastingBlockCursorTextColor() throws {
+        let theme = TerminalTheme.swiftTermDark
+        let caretText = try #require(theme.caretText)
+
+        #expect(caretText == theme.background)
+        #expect(caretText != theme.caret)
+    }
 }
 #endif

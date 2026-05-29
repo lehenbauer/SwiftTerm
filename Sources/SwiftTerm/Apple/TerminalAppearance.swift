@@ -79,12 +79,13 @@ extension TerminalTheme {
         #else
         let selection = UIColor(red: 204.0/255.0, green: 221.0/255.0, blue: 237.0/255.0, alpha: 1.0)
         #endif
+        let background = TTColor.make(color: Color.defaultBackground)
         return TerminalTheme(
             foreground: TTColor.make(color: Color.defaultForeground),
-            background: TTColor.make(color: Color.defaultBackground),
+            background: background,
             boldForeground: nil,
             caret: TTColor.make(color: Color.defaultForeground),
-            caretText: nil,
+            caretText: background,
             selectionBackground: selection,
             ansi16: Color.terminalAppColors,
             ansi256Strategy: .base16Lab)
