@@ -343,6 +343,54 @@ final class SelectionTests: TerminalDelegate {
         #expect(text.contains("CCC"))
     }
 
+    @Test func testSelectionTextPreservesAutowrappedLogicalLine() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 10, rows: 5))
+        let selection = SelectionService(terminal: terminal)
+        terminal.feed(text: "ABCDEFGHIJKLMNO\r\nsecond")
+
+        #expect(TerminalTestHarness.isWrapped(buffer: terminal.buffer, row: 1) == true)
+
+        selection.setSelection(
+            start: Position(col: 0, row: 0),
+            end: Position(col: 6, row: 2)
+        )
+
+        #expect(selection.getSelectedText() == "ABCDEFGHIJKLMNO\nsecond")
+    }
+
+    @Test func testSelectionTextPreservesAutowrappedLogicalLineAfterFullReset() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 10, rows: 5))
+        let selection = SelectionService(terminal: terminal)
+        terminal.feed(text: "\u{1b}cABCDEFGHIJKLMNO\r\nsecond")
+
+        #expect(TerminalTestHarness.isWrapped(buffer: terminal.buffer, row: 1) == true)
+
+        selection.setSelection(
+            start: Position(col: 0, row: 0),
+            end: Position(col: 6, row: 2)
+        )
+
+        #expect(selection.getSelectedText() == "ABCDEFGHIJKLMNO\nsecond")
+    }
+
+    @Test func testSelectionTextPreservesAutowrappedLogicalLineAfterScrollback() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 10, rows: 2, scrollback: 50))
+        let selection = SelectionService(terminal: terminal)
+        terminal.feed(text: "ABCDEFGHIJKLMNO\r\nsecond\r\nthird\r\nfourth")
+
+        var wrappedLineCount = 0
+        for index in 0..<terminal.displayBuffer.lines.count where terminal.displayBuffer.lines[index].isWrapped {
+            wrappedLineCount += 1
+        }
+        #expect(wrappedLineCount > 0)
+
+        selection.selectAll()
+
+        let text = selection.getSelectedText()
+        #expect(text.contains("ABCDEFGHIJKLMNO"))
+        #expect(!text.contains("ABCDEFGHIJ\nKLMNO"))
+    }
+
     /// Test word selection at word boundaries
     /// From Ghostty: word boundary selection
     @Test func testWordSelectionAtBoundary() {
