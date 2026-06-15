@@ -16,6 +16,7 @@ struct ScrollbackHydrationTests {
         #expect(inserted == 2)
         #expect(after == before)
         #expect(terminal.buffer.yDisp == 2)
+        #expect(terminal.buffer.totalLinesTrimmed == -2)
         #expect(terminal.buffer.lines.count == 5)
         #expect(terminal.buffer.translateBufferLineToString(lineIndex: 0, trimRight: true, characterProvider: { terminal.getCharacter(for: $0) }) == "old one")
         #expect(terminal.buffer.translateBufferLineToString(lineIndex: 1, trimRight: true, characterProvider: { terminal.getCharacter(for: $0) }) == "old two")
