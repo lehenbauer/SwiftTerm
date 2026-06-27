@@ -1700,7 +1700,7 @@ extension TerminalView {
                 let buffer = terminal.displayBuffer
                 let cursor = (x: buffer.x, y: buffer.yBase + buffer.y, hidden: terminal.cursorHidden)
                 if lastRenderedCursor == nil || lastRenderedCursor! != cursor {
-                    lastRenderedCursor = cursor
+                    noteMetalCursorActivityIfNeeded(cursor)
                     requestMetalDisplay()
                 }
             }
@@ -1755,7 +1755,7 @@ extension TerminalView {
                     metalDirtyRange = nil
                 }
             }
-            lastRenderedCursor = (x: buffer.x, y: buffer.yBase + buffer.y, hidden: terminal.cursorHidden)
+            noteMetalCursorActivityIfNeeded((x: buffer.x, y: buffer.yBase + buffer.y, hidden: terminal.cursorHidden))
             requestMetalDisplay()
         } else {
             setNeedsDisplay(region)
@@ -1770,7 +1770,7 @@ extension TerminalView {
         if metalView != nil {
             metalDirtyRange = metalVisibleRange()
             let buffer = terminal.displayBuffer
-            lastRenderedCursor = (x: buffer.x, y: buffer.yBase + buffer.y, hidden: terminal.cursorHidden)
+            noteMetalCursorActivityIfNeeded((x: buffer.x, y: buffer.yBase + buffer.y, hidden: terminal.cursorHidden))
             requestMetalDisplay()
         } else {
             setNeedsDisplay(bounds)
@@ -1861,6 +1861,13 @@ extension TerminalView {
     }
 
 #if canImport(MetalKit)
+    func noteMetalCursorActivityIfNeeded(_ cursor: (x: Int, y: Int, hidden: Bool)) {
+        if lastRenderedCursor == nil || lastRenderedCursor! != cursor {
+            metalRenderer?.noteCursorActivity()
+        }
+        lastRenderedCursor = cursor
+    }
+
     func requestMetalDisplay() {
         guard let metalView = metalView else {
             return
