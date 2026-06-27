@@ -622,6 +622,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         }
 
         let visibleRange = firstRow...lastRow
+        terminalView.pruneLineInfoCache(to: visibleRange)
         if !rowCache.isEmpty {
             rowCache = rowCache.filter { visibleRange.contains($0.key) }
         }
@@ -858,7 +859,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         let lineOffset = cellHeight * CGFloat(row - yDisp + 1)
         let lineOrigin = CGPoint(x: 0, y: terminalView.bounds.height - lineOffset)
         let rowBase = lineOrigin.y + cellHeight
-        let lineInfo = terminalView.buildAttributedString(row: row, line: line, cols: buffer.cols)
+        let lineInfo = terminalView.cachedLineInfo(row: row, line: line, cols: buffer.cols)
         let shapedSegments = buildShapedSegments(lineInfo.segments, terminalView: terminalView)
         let lineOriginPx = CGPoint(x: lineOrigin.x * scale, y: lineOrigin.y * scale)
         let cellWidthPx = cellWidth * scale

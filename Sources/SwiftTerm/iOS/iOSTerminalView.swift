@@ -150,6 +150,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     public var linkHighlightMode: LinkHighlightMode = .hover {
         didSet {
             linkHighlightRange = nil
+            resetLineInfoCache()
             terminal.updateFullScreen()
             queuePendingDisplay()
         }
@@ -191,6 +192,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     var search: SearchService!
     var debug: UIView?
     var pendingDisplay: Bool = false
+    var lineInfoCache: [Int: LineInfoCacheEntry] = [:]
+    var lineInfoCacheGeneration: UInt64 = 0
 #if canImport(MetalKit)
     var metalView: MTKView?
     var metalRenderer: MetalTerminalRenderer?
@@ -1339,6 +1342,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     /// When true, block element (U+2580-U+259F) and box drawing (U+2500-U+257F) characters use custom rendering.
     public var customBlockGlyphs: Bool = true {
         didSet {
+            resetLineInfoCache()
             terminal.updateFullScreen()
             queuePendingDisplay()
         }
@@ -1360,6 +1364,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         }
         set {
             _selectedTextBackgroundColor = newValue
+            resetLineInfoCache()
         }
     }
     
@@ -2798,6 +2803,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 updateLinkHighlightIfNeeded(at: point, modifiers: [.command], force: true)
             }
             if linkHighlightMode == .alwaysWithModifier {
+                resetLineInfoCache()
                 terminal.updateFullScreen()
             }
             if linkHighlightMode == .alwaysWithModifier || linkHighlightMode == .hoverWithModifier {
@@ -2833,6 +2839,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         }
         if commandActive != wasCommandActive {
             if linkHighlightMode == .alwaysWithModifier {
+                resetLineInfoCache()
                 terminal.updateFullScreen()
             }
             if linkHighlightMode == .alwaysWithModifier || linkHighlightMode == .hoverWithModifier {
@@ -2922,6 +2929,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         pendingSelectionChanged = true
         DispatchQueue.main.async {
             self.pendingSelectionChanged = false
+            self.resetLineInfoCache()
             
             self.inputDelegate?.selectionWillChange (self)
             self.inputDelegate?.selectionDidChange(self)
