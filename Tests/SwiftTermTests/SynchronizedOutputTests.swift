@@ -38,7 +38,14 @@ final class SynchronizedOutputTests {
         ).replacingOccurrences(of: "\u{0}", with: " ")
     }
 
-    @Test func testSynchronizedOutputKeepsLiveDisplayBuffer() {
+    /// Synchronized output (DEC mode 2026) no longer snapshots the buffer in
+    /// the core: `displayBuffer === buffer` and the live buffer is mutated
+    /// immediately. Display blocking is enforced at the view layer instead
+    /// (`AppleTerminalView.updateDisplay` early-returns while the flag is set,
+    /// covered by the view-level tests below). This test pins the core
+    /// contract: the active flag toggles on `?2026h`/`?2026l`, and the live
+    /// buffer always reflects the most recent content.
+    @Test func testSynchronizedOutputTracksLiveBufferAndTogglesFlag() {
         let terminal = Terminal(
             delegate: TestDelegate(),
             options: TerminalOptions(cols: 20, rows: 5, scrollback: 0)
@@ -47,22 +54,25 @@ final class SynchronizedOutputTests {
 
         terminal.feed(text: "\(esc)[2J\(esc)[HOLD")
         #expect(topLineText(from: terminal.displayBuffer).hasPrefix("OLD"))
+        #expect(!terminal.synchronizedOutputActive)
 
         terminal.feed(text: "\(esc)[?2026h")
-        terminal.feed(text: "\(esc)[2J\(esc)[HNEW")
-
         #expect(terminal.synchronizedOutputActive)
-        #expect(topLineText(from: terminal.displayBuffer).hasPrefix("NEW"))
+
+        terminal.feed(text: "\(esc)[2J\(esc)[HNEW")
+        // Core does not freeze the buffer during sync; the new content is live
+        // immediately and displayBuffer mirrors it.
         #expect(topLineText(from: terminal.buffer).hasPrefix("NEW"))
+        #expect(topLineText(from: terminal.displayBuffer).hasPrefix("NEW"))
 
         terminal.feed(text: "\(esc)[?2026l")
         #expect(!terminal.synchronizedOutputActive)
         #expect(topLineText(from: terminal.displayBuffer).hasPrefix("NEW"))
     }
 
-    /// Regression: setViewYDisp must update both live and frozen buffers
-    /// during synchronized output so user-initiated scrolling is not dropped.
-    @Test func testViewportScrollDuringSyncUpdatesBothBuffers() {
+    /// Regression: setViewYDisp must update the live display buffer during
+    /// synchronized output so user-initiated scrolling is not dropped.
+    @Test func testViewportScrollDuringSyncUpdatesLiveDisplayBuffer() {
         let terminal = Terminal(
             delegate: TestDelegate(),
             options: TerminalOptions(cols: 40, rows: 5, scrollback: 20)
