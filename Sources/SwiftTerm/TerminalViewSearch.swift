@@ -51,6 +51,69 @@ extension TerminalView {
         return false
     }
 
+    /// Finds the previous match above the current visible viewport, or continues
+    /// from the existing search result when the current selection is that result.
+    ///
+    /// This is useful for commands whose first invocation should mean "go to the
+    /// previous item above what I am looking at" instead of the normal Find
+    /// behavior of starting from the end of the buffer.
+    @discardableResult
+    public func findPreviousFromVisibleTop (_ term: String, options: SearchOptions = SearchOptions(), scrollToResult: Bool = true) -> Bool {
+        guard let search = search, let selection = selection else {
+            return false
+        }
+
+        let currentSelection = currentSearchSelection(selection)
+        let result: SearchResult?
+        if search.canContinueSearch(term: term, options: options, selection: currentSelection) {
+            search.updateLastSelection(currentSelection)
+            result = search.findPrevious(term: term, options: options)
+        } else {
+            result = search.findPreviousBeforeRow(
+                term: term,
+                options: options,
+                beforeRow: terminal.displayBuffer.yDisp
+            )
+        }
+
+        if let result {
+            return applySearchResult(result, selection: selection, scrollToResult: scrollToResult)
+        }
+
+        selection.selectNone()
+        return false
+    }
+
+    /// Finds the next match below the current visible viewport, or continues
+    /// from the existing search result when the current selection is that result.
+    @discardableResult
+    public func findNextFromVisibleBottom (_ term: String, options: SearchOptions = SearchOptions(), scrollToResult: Bool = true) -> Bool {
+        guard let search = search, let selection = selection else {
+            return false
+        }
+
+        let currentSelection = currentSearchSelection(selection)
+        let result: SearchResult?
+        if search.canContinueSearch(term: term, options: options, selection: currentSelection) {
+            search.updateLastSelection(currentSelection)
+            result = search.findNext(term: term, options: options)
+        } else {
+            let displayBuffer = terminal.displayBuffer
+            result = search.findNextAfterRow(
+                term: term,
+                options: options,
+                afterRow: displayBuffer.yDisp + displayBuffer.rows - 1
+            )
+        }
+
+        if let result {
+            return applySearchResult(result, selection: selection, scrollToResult: scrollToResult)
+        }
+
+        selection.selectNone()
+        return false
+    }
+
 
     /// Position of the current match among all matches for `term`: a 1-based
     /// `index` (0 when there is no current match) and the `total` match count

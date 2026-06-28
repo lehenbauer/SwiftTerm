@@ -49,12 +49,20 @@ final class SearchService {
         lastSelection = selection
     }
 
+    func canContinueSearch (term: String, options: SearchOptions, selection: SearchSelection?) -> Bool {
+        guard state.cachedSearchTerm == term,
+              state.lastSearchOptions == options,
+              let selection,
+              let lastSelection else {
+            return false
+        }
+        return selection == lastSelection
+    }
+
     @discardableResult
     func findNext (term: String, options: SearchOptions = SearchOptions()) -> SearchResult? {
         guard state.isValidSearchTerm(term) else {
-            lastResult = nil
-            lastSelection = nil
-            state.reset()
+            resetInvalidSearch()
             return nil
         }
 
@@ -62,17 +70,14 @@ final class SearchService {
         let result = engine.findNextWithSelection(term: term, searchOptions: options, cachedSearchTerm: state.cachedSearchTerm, previousSelection: lastSelection)
         state.cachedSearchTerm = term
 
-        lastResult = result
-        lastSelection = result.map { selection(for: $0) }
+        recordResult(result, term: term, options: options)
         return result
     }
 
     @discardableResult
     func findPrevious (term: String, options: SearchOptions = SearchOptions()) -> SearchResult? {
         guard state.isValidSearchTerm(term) else {
-            lastResult = nil
-            lastSelection = nil
-            state.reset()
+            resetInvalidSearch()
             return nil
         }
 
@@ -80,8 +85,31 @@ final class SearchService {
         let result = engine.findPreviousWithSelection(term: term, searchOptions: options, cachedSearchTerm: state.cachedSearchTerm, previousSelection: lastSelection)
         state.cachedSearchTerm = term
 
-        lastResult = result
-        lastSelection = result.map { selection(for: $0) }
+        recordResult(result, term: term, options: options)
+        return result
+    }
+
+    @discardableResult
+    func findPreviousBeforeRow (term: String, options: SearchOptions = SearchOptions(), beforeRow: Int) -> SearchResult? {
+        guard state.isValidSearchTerm(term) else {
+            resetInvalidSearch()
+            return nil
+        }
+
+        let result = engine.findPreviousBeforeRow(term: term, searchOptions: options, beforeRow: beforeRow)
+        recordResult(result, term: term, options: options)
+        return result
+    }
+
+    @discardableResult
+    func findNextAfterRow (term: String, options: SearchOptions = SearchOptions(), afterRow: Int) -> SearchResult? {
+        guard state.isValidSearchTerm(term) else {
+            resetInvalidSearch()
+            return nil
+        }
+
+        let result = engine.findNextAfterRow(term: term, searchOptions: options, afterRow: afterRow)
+        recordResult(result, term: term, options: options)
         return result
     }
 
@@ -122,6 +150,19 @@ final class SearchService {
     private func selection (for result: SearchResult) -> SearchSelection {
         let range = selectionRange(for: result)
         return SearchSelection(start: range.start, end: range.end)
+    }
+
+    private func recordResult (_ result: SearchResult?, term: String, options: SearchOptions) {
+        state.lastSearchOptions = options
+        state.cachedSearchTerm = term
+        lastResult = result
+        lastSelection = result.map { selection(for: $0) }
+    }
+
+    private func resetInvalidSearch () {
+        lastResult = nil
+        lastSelection = nil
+        state.reset()
     }
 
     private func advancePosition (from position: Position, by cells: Int) -> Position {
