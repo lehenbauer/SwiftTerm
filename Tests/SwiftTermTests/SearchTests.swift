@@ -352,6 +352,10 @@ final class SearchTests {
         #expect(anchored == SearchResult(term: "prompt", col: 0, row: 4, size: 6))
         let anchoredSelection = anchored.map { SearchSelection(start: service.selectionRange(for: $0).start, end: service.selectionRange(for: $0).end) }
         #expect(service.canContinueSearch(term: "prompt", options: options, selection: anchoredSelection))
+        #expect(!service.canContinueSearch(term: "prompt", options: options, selection: anchoredSelection, viewportYDisp: 12))
+        service.updateLastResultViewport(yDisp: 12)
+        #expect(service.canContinueSearch(term: "prompt", options: options, selection: anchoredSelection, viewportYDisp: 12))
+        #expect(!service.canContinueSearch(term: "prompt", options: options, selection: anchoredSelection, viewportYDisp: 13))
 
         let previous = service.findPrevious(term: "prompt", options: options)
         #expect(previous == SearchResult(term: "prompt", col: 0, row: 2, size: 6))

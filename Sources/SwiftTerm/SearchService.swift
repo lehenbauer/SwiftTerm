@@ -17,6 +17,7 @@ final class SearchService {
     private let lineCache: SearchLineCache
     private let engine: SearchEngine
     private var lastSelection: SearchSelection?
+    private var lastResultViewportYDisp: Int?
 
     private(set) var lastResult: SearchResult?
 
@@ -36,6 +37,7 @@ final class SearchService {
         lineCache.invalidate()
         lastResult = nil
         lastSelection = nil
+        lastResultViewportYDisp = nil
     }
 
     func reset () {
@@ -43,17 +45,27 @@ final class SearchService {
         state.reset()
         lastResult = nil
         lastSelection = nil
+        lastResultViewportYDisp = nil
     }
 
     func updateLastSelection (_ selection: SearchSelection?) {
         lastSelection = selection
     }
 
-    func canContinueSearch (term: String, options: SearchOptions, selection: SearchSelection?) -> Bool {
+    func updateLastResultViewport (yDisp: Int) {
+        if lastResult != nil {
+            lastResultViewportYDisp = yDisp
+        }
+    }
+
+    func canContinueSearch (term: String, options: SearchOptions, selection: SearchSelection?, viewportYDisp: Int? = nil) -> Bool {
         guard state.cachedSearchTerm == term,
               state.lastSearchOptions == options,
               let selection,
               let lastSelection else {
+            return false
+        }
+        if let viewportYDisp, lastResultViewportYDisp != viewportYDisp {
             return false
         }
         return selection == lastSelection
@@ -157,6 +169,7 @@ final class SearchService {
         state.cachedSearchTerm = term
         lastResult = result
         lastSelection = result.map { selection(for: $0) }
+        lastResultViewportYDisp = nil
     }
 
     private func resetInvalidSearch () {

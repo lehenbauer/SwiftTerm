@@ -65,7 +65,12 @@ extension TerminalView {
 
         let currentSelection = currentSearchSelection(selection)
         let result: SearchResult?
-        if search.canContinueSearch(term: term, options: options, selection: currentSelection) {
+        if search.canContinueSearch(
+            term: term,
+            options: options,
+            selection: currentSelection,
+            viewportYDisp: terminal.displayBuffer.yDisp
+        ) {
             search.updateLastSelection(currentSelection)
             result = search.findPrevious(term: term, options: options)
         } else {
@@ -94,7 +99,12 @@ extension TerminalView {
 
         let currentSelection = currentSearchSelection(selection)
         let result: SearchResult?
-        if search.canContinueSearch(term: term, options: options, selection: currentSelection) {
+        if search.canContinueSearch(
+            term: term,
+            options: options,
+            selection: currentSelection,
+            viewportYDisp: terminal.displayBuffer.yDisp
+        ) {
             search.updateLastSelection(currentSelection)
             result = search.findNext(term: term, options: options)
         } else {
@@ -143,6 +153,7 @@ extension TerminalView {
         if scrollToResult {
             scrollToReveal(row: result.row)
         }
+        search?.updateLastResultViewport(yDisp: terminal.displayBuffer.yDisp)
         return true
     }
 
