@@ -87,14 +87,20 @@ final class SearchService {
     }
 
     @discardableResult
-    func findPrevious (term: String, options: SearchOptions = SearchOptions()) -> SearchResult? {
+    func findPrevious (term: String, options: SearchOptions = SearchOptions(), wraps: Bool = true) -> SearchResult? {
         guard state.isValidSearchTerm(term) else {
             resetInvalidSearch()
             return nil
         }
 
         state.lastSearchOptions = options
-        let result = engine.findPreviousWithSelection(term: term, searchOptions: options, cachedSearchTerm: state.cachedSearchTerm, previousSelection: lastSelection)
+        let result = engine.findPreviousWithSelection(
+            term: term,
+            searchOptions: options,
+            cachedSearchTerm: state.cachedSearchTerm,
+            previousSelection: lastSelection,
+            wraps: wraps
+        )
         state.cachedSearchTerm = term
 
         recordResult(result, term: term, options: options)

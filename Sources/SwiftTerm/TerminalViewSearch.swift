@@ -58,7 +58,13 @@ extension TerminalView {
     /// previous item above what I am looking at" instead of the normal Find
     /// behavior of starting from the end of the buffer.
     @discardableResult
-    public func findPreviousFromVisibleTop (_ term: String, options: SearchOptions = SearchOptions(), scrollToResult: Bool = true) -> Bool {
+    public func findPreviousFromVisibleTop (
+        _ term: String,
+        options: SearchOptions = SearchOptions(),
+        scrollToResult: Bool = true,
+        wraps: Bool = true,
+        clearSelectionOnMiss: Bool = true
+    ) -> Bool {
         guard let search = search, let selection = selection else {
             return false
         }
@@ -72,7 +78,7 @@ extension TerminalView {
             viewportYDisp: terminal.displayBuffer.yDisp
         ) {
             search.updateLastSelection(currentSelection)
-            result = search.findPrevious(term: term, options: options)
+            result = search.findPrevious(term: term, options: options, wraps: wraps)
         } else {
             result = search.findPreviousBeforeRow(
                 term: term,
@@ -85,7 +91,9 @@ extension TerminalView {
             return applySearchResult(result, selection: selection, scrollToResult: scrollToResult)
         }
 
-        selection.selectNone()
+        if clearSelectionOnMiss {
+            selection.selectNone()
+        }
         return false
     }
 

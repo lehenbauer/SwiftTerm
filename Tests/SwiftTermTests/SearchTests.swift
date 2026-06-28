@@ -365,6 +365,21 @@ final class SearchTests {
         #expect(earliestWrap == SearchResult(term: "prompt", col: 0, row: 4, size: 6))
     }
 
+    @Test func testSearchServiceAnchoredPreviousCanStopBeforeWrap() {
+        let terminal = makeTerminal()
+        let service = SearchService(terminal: terminal)
+        let options = SearchOptions()
+
+        terminal.feed(text: "prompt 0\r\nbody\r\nprompt 1\r\nbody\r\nprompt 2")
+
+        let anchored = service.findPreviousBeforeRow(term: "prompt", options: options, beforeRow: 5)
+        #expect(anchored == SearchResult(term: "prompt", col: 0, row: 4, size: 6))
+
+        #expect(service.findPrevious(term: "prompt", options: options, wraps: false) == SearchResult(term: "prompt", col: 0, row: 2, size: 6))
+        #expect(service.findPrevious(term: "prompt", options: options, wraps: false) == SearchResult(term: "prompt", col: 0, row: 0, size: 6))
+        #expect(service.findPrevious(term: "prompt", options: options, wraps: false) == nil)
+    }
+
     @Test func testSearchServiceAnchoredPreviousDoesNotContinueFromUnrelatedSelection() {
         let terminal = makeTerminal()
         let service = SearchService(terminal: terminal)

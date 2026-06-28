@@ -114,7 +114,7 @@ final class SearchEngine {
         return result
     }
 
-    func findPreviousWithSelection (term: String, searchOptions: SearchOptions? = nil, cachedSearchTerm: String?, previousSelection: SearchSelection?) -> SearchResult? {
+    func findPreviousWithSelection (term: String, searchOptions: SearchOptions? = nil, cachedSearchTerm: String?, previousSelection: SearchSelection?, wraps: Bool = true) -> SearchResult? {
         if term.isEmpty {
             return nil
         }
@@ -162,7 +162,7 @@ final class SearchEngine {
             }
         }
 
-        if result == nil && startRow != maxRow {
+        if wraps && result == nil && startRow != maxRow {
             for y in stride(from: maxRow, through: startRow, by: -1) {
                 searchPosition.startRow = y
                 result = findInLine(term: term, searchPosition: &searchPosition, searchOptions: searchOptions, isReverseSearch: isReverseSearch)
