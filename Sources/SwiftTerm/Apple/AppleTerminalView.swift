@@ -108,6 +108,14 @@ struct GlyphSlotFit {
     var isIdentity: Bool { dx == 0 && dy == 0 && scale == 1 }
 }
 
+struct LineInfoCacheEntry {
+    var lineRef: BufferLine
+    var generation: UInt64
+    var cols: Int
+    var cacheGeneration: UInt64
+    var info: ViewLineInfo
+}
+
 extension TerminalView {
     typealias CellDimension = CGSize
 
@@ -138,6 +146,43 @@ extension TerminalView {
         self.urlAttributes = [:]
         self.colors = Array(repeating: nil, count: 256)
         self.trueColors = [:]
+        resetLineInfoCache()
+    }
+
+    func resetLineInfoCache()
+    {
+        lineInfoCache.removeAll()
+        lineInfoCacheGeneration &+= 1
+    }
+
+    func invalidateLineInfoCache(row: Int)
+    {
+        lineInfoCache.removeValue(forKey: row)
+    }
+
+    func pruneLineInfoCache(to visibleRows: ClosedRange<Int>)
+    {
+        guard !lineInfoCache.isEmpty else { return }
+        lineInfoCache = lineInfoCache.filter { visibleRows.contains($0.key) }
+    }
+
+    func cachedLineInfo(row: Int, line: BufferLine, cols: Int) -> ViewLineInfo
+    {
+        if let cached = lineInfoCache[row],
+           cached.lineRef === line,
+           cached.generation == line.generation,
+           cached.cols == cols,
+           cached.cacheGeneration == lineInfoCacheGeneration {
+            return cached.info
+        }
+
+        let info = buildAttributedString(row: row, line: line, cols: cols)
+        lineInfoCache[row] = LineInfoCacheEntry(lineRef: line,
+                                                generation: line.generation,
+                                                cols: cols,
+                                                cacheGeneration: lineInfoCacheGeneration,
+                                                info: info)
+        return info
     }
     
     // This is invoked when the font changes to recompute state
@@ -394,6 +439,7 @@ extension TerminalView {
     {
         urlAttributes = [:]
         attributes = [:]
+        resetLineInfoCache()
         
         terminal.updateFullScreen ()
         queuePendingDisplay()
@@ -911,6 +957,7 @@ extension TerminalView {
     func invalidateLinkHighlightRow(_ bufferRow: Int)
     {
         let displayBuffer = terminal.displayBuffer
+        invalidateLineInfoCache(row: bufferRow)
         let screenRow = bufferRow - displayBuffer.yDisp
         guard screenRow >= 0 && screenRow < terminal.rows else {
             return
@@ -1281,6 +1328,18 @@ extension TerminalView {
         let lastRow = displayBuffer.yDisp+Int((boundsMaxY-dirtyRect.minY)/cellHeight)
         #endif
 
+        if displayBuffer.lines.count == 0 {
+            lineInfoCache.removeAll()
+        } else {
+            let firstVisibleCacheRow = max(0, firstRow)
+            let lastVisibleCacheRow = min(displayBuffer.lines.count - 1, lastRow)
+            if firstVisibleCacheRow <= lastVisibleCacheRow {
+                pruneLineInfoCache(to: firstVisibleCacheRow...lastVisibleCacheRow)
+            } else {
+                lineInfoCache.removeAll()
+            }
+        }
+
         let isAltBuffer = terminal.isCurrentBufferAlternate
         var virtualPlacementsByImageId: [UInt32: [KittyPlacementRecord]] = [:]
         if !terminal.kittyGraphicsState.placementsByKey.isEmpty {
@@ -1351,7 +1410,7 @@ extension TerminalView {
             } 
             #endif
             let line = displayBuffer.lines [row]
-            let lineInfo = buildAttributedString(row: row, line: line, cols: displayBuffer.cols)
+            let lineInfo = cachedLineInfo(row: row, line: line, cols: displayBuffer.cols)
             let rowBase = lineOrigin.y + cellDimension.height
             var underTextImages: [AppleImage] = []
             var overTextKittyImages: [AppleImage] = []
@@ -1752,7 +1811,7 @@ extension TerminalView {
                 let buffer = terminal.displayBuffer
                 let cursor = (x: buffer.x, y: buffer.yBase + buffer.y, hidden: terminal.cursorHidden)
                 if lastRenderedCursor == nil || lastRenderedCursor! != cursor {
-                    lastRenderedCursor = cursor
+                    noteMetalCursorActivityIfNeeded(cursor)
                     requestMetalDisplay()
                 }
             }
@@ -1807,7 +1866,7 @@ extension TerminalView {
                     metalDirtyRange = nil
                 }
             }
-            lastRenderedCursor = (x: buffer.x, y: buffer.yBase + buffer.y, hidden: terminal.cursorHidden)
+            noteMetalCursorActivityIfNeeded((x: buffer.x, y: buffer.yBase + buffer.y, hidden: terminal.cursorHidden))
             requestMetalDisplay()
         } else {
             setNeedsDisplay(region)
@@ -1822,7 +1881,7 @@ extension TerminalView {
         if metalView != nil {
             metalDirtyRange = metalVisibleRange()
             let buffer = terminal.displayBuffer
-            lastRenderedCursor = (x: buffer.x, y: buffer.yBase + buffer.y, hidden: terminal.cursorHidden)
+            noteMetalCursorActivityIfNeeded((x: buffer.x, y: buffer.yBase + buffer.y, hidden: terminal.cursorHidden))
             requestMetalDisplay()
         } else {
             setNeedsDisplay(bounds)
@@ -1918,6 +1977,13 @@ extension TerminalView {
     }
 
 #if canImport(MetalKit)
+    func noteMetalCursorActivityIfNeeded(_ cursor: (x: Int, y: Int, hidden: Bool)) {
+        if lastRenderedCursor == nil || lastRenderedCursor! != cursor {
+            metalRenderer?.noteCursorActivity()
+        }
+        lastRenderedCursor = cursor
+    }
+
     func requestMetalDisplay() {
         guard let metalView = metalView else {
             return

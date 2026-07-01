@@ -23,17 +23,20 @@ final class TerminalViewCursorTests {
         #expect(MetalTerminalRenderer.shouldHideCursorForBlinkFrame(
             style: .blinkBlock,
             hasFocus: false,
-            cursorBlinkOn: false
+            cursorBlinkOn: false,
+            cursorActivityVisible: false
         ) == false)
         #expect(MetalTerminalRenderer.shouldHideCursorForBlinkFrame(
             style: .blinkUnderline,
             hasFocus: false,
-            cursorBlinkOn: false
+            cursorBlinkOn: false,
+            cursorActivityVisible: false
         ) == false)
         #expect(MetalTerminalRenderer.shouldHideCursorForBlinkFrame(
             style: .blinkBar,
             hasFocus: false,
-            cursorBlinkOn: false
+            cursorBlinkOn: false,
+            cursorActivityVisible: false
         ) == false)
     }
 
@@ -41,12 +44,31 @@ final class TerminalViewCursorTests {
         #expect(MetalTerminalRenderer.shouldHideCursorForBlinkFrame(
             style: .blinkBlock,
             hasFocus: true,
-            cursorBlinkOn: false
+            cursorBlinkOn: false,
+            cursorActivityVisible: false
         ) == true)
         #expect(MetalTerminalRenderer.shouldHideCursorForBlinkFrame(
             style: .steadyBlock,
             hasFocus: true,
-            cursorBlinkOn: false
+            cursorBlinkOn: false,
+            cursorActivityVisible: false
+        ) == false)
+    }
+
+    @Test func testMetalCursorActivityKeepsFocusedBlinkingCursorVisible() {
+        #expect(MetalTerminalRenderer.shouldHideCursorForBlinkFrame(
+            style: .blinkBlock,
+            hasFocus: true,
+            cursorBlinkOn: false,
+            cursorActivityVisible: true
+        ) == false)
+        #expect(MetalTerminalRenderer.isCursorActivityVisible(
+            now: 1.0,
+            visibleUntil: 1.7
+        ) == true)
+        #expect(MetalTerminalRenderer.isCursorActivityVisible(
+            now: 1.7,
+            visibleUntil: 1.7
         ) == false)
     }
 

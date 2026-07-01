@@ -6,6 +6,7 @@ import os
 import CoreText
 import Metal
 import MetalKit
+import QuartzCore
 #if os(macOS)
 import AppKit
 #else
@@ -177,6 +178,7 @@ struct CacheSignature: Hashable {
 }
 
 final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
+    private static let cursorBlinkInterval: TimeInterval = 0.7
 #if canImport(os)
     private static let profileLog = OSLog(subsystem: "org.tirania.SwiftTerm", category: "MetalProfile")
     private static let profileEnabled = ProcessInfo.processInfo.environment["SWIFTTERM_PROFILE"] == "1"
@@ -210,6 +212,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     private var atlasResetHandled = false
     private var cursorBlinkTimer: Timer?
     private var cursorBlinkOn = true
+    private var cursorActivityVisibleUntil: CFTimeInterval = 0
     private let frameSemaphore = DispatchSemaphore(value: 1)
     private var pendingRedraw = false
     private let redrawLock = NSLock()
@@ -622,6 +625,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         }
 
         let visibleRange = firstRow...lastRow
+        terminalView.pruneLineInfoCache(to: visibleRange)
         if !rowCache.isEmpty {
             rowCache = rowCache.filter { visibleRange.contains($0.key) }
         }
@@ -858,7 +862,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         let lineOffset = cellHeight * CGFloat(row - yDisp + 1)
         let lineOrigin = CGPoint(x: 0, y: terminalView.bounds.height - lineOffset)
         let rowBase = lineOrigin.y + cellHeight
-        let lineInfo = terminalView.buildAttributedString(row: row, line: line, cols: buffer.cols)
+        let lineInfo = terminalView.cachedLineInfo(row: row, line: line, cols: buffer.cols)
         let shapedSegments = buildShapedSegments(lineInfo.segments, terminalView: terminalView)
         let lineOriginPx = CGPoint(x: lineOrigin.x * scale, y: lineOrigin.y * scale)
         let cellWidthPx = cellWidth * scale
@@ -2093,10 +2097,15 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         }
         let cursorStyle = terminalView.terminal.options.cursorStyle
         let hasFocus = cursorHasFocus(terminalView)
+        let cursorActivityVisible = Self.isCursorActivityVisible(
+            now: CACurrentMediaTime(),
+            visibleUntil: cursorActivityVisibleUntil
+        )
         if Self.shouldHideCursorForBlinkFrame(
             style: cursorStyle,
             hasFocus: hasFocus,
-            cursorBlinkOn: cursorBlinkOn
+            cursorBlinkOn: cursorBlinkOn,
+            cursorActivityVisible: cursorActivityVisible
         ) {
             return ([], [], [])
         }
@@ -2647,9 +2656,14 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     static func shouldHideCursorForBlinkFrame(
         style: CursorStyle,
         hasFocus: Bool,
-        cursorBlinkOn: Bool
+        cursorBlinkOn: Bool,
+        cursorActivityVisible: Bool
     ) -> Bool {
-        hasFocus && isBlinkStyle(style) && !cursorBlinkOn
+        hasFocus && isBlinkStyle(style) && !cursorBlinkOn && !cursorActivityVisible
+    }
+
+    static func isCursorActivityVisible(now: CFTimeInterval, visibleUntil: CFTimeInterval) -> Bool {
+        now < visibleUntil
     }
 
     static func inactiveCursorOutlineThickness(scale: CGFloat) -> CGFloat {
@@ -2675,11 +2689,16 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         }
     }
 
+    func noteCursorActivity(now: CFTimeInterval = CACurrentMediaTime()) {
+        cursorBlinkOn = true
+        cursorActivityVisibleUntil = max(cursorActivityVisibleUntil, now + Self.cursorBlinkInterval)
+    }
+
     private func updateCursorBlinkTimer(shouldBlink: Bool) {
         if shouldBlink {
             if cursorBlinkTimer == nil {
                 cursorBlinkOn = true
-                cursorBlinkTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in
+                cursorBlinkTimer = Timer.scheduledTimer(withTimeInterval: Self.cursorBlinkInterval, repeats: true) { [weak self] _ in
                     guard let self = self, let view = self.view else {
                         return
                     }
@@ -2691,6 +2710,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             timer.invalidate()
             cursorBlinkTimer = nil
             cursorBlinkOn = true
+            cursorActivityVisibleUntil = 0
         }
     }
 

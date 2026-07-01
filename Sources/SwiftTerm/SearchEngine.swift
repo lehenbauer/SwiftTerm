@@ -14,7 +14,7 @@ struct SearchResult: Equatable {
     let size: Int
 }
 
-struct SearchSelection {
+struct SearchSelection: Equatable {
     let start: Position
     let end: Position
 }
@@ -114,7 +114,7 @@ final class SearchEngine {
         return result
     }
 
-    func findPreviousWithSelection (term: String, searchOptions: SearchOptions? = nil, cachedSearchTerm: String?, previousSelection: SearchSelection?) -> SearchResult? {
+    func findPreviousWithSelection (term: String, searchOptions: SearchOptions? = nil, cachedSearchTerm: String?, previousSelection: SearchSelection?, wraps: Bool = true) -> SearchResult? {
         if term.isEmpty {
             return nil
         }
@@ -162,10 +162,70 @@ final class SearchEngine {
             }
         }
 
-        if result == nil && startRow != maxRow {
+        if wraps && result == nil && startRow != maxRow {
             for y in stride(from: maxRow, through: startRow, by: -1) {
                 searchPosition.startRow = y
                 result = findInLine(term: term, searchPosition: &searchPosition, searchOptions: searchOptions, isReverseSearch: isReverseSearch)
+                if result != nil {
+                    break
+                }
+            }
+        }
+
+        return result
+    }
+
+    func findPreviousBeforeRow (term: String, searchOptions: SearchOptions? = nil, beforeRow: Int) -> SearchResult? {
+        if term.isEmpty {
+            return nil
+        }
+
+        lineCache.initLinesCache()
+
+        let rowCount = terminal.displayBuffer.lines.count
+        guard rowCount > 0, beforeRow > 0 else {
+            return nil
+        }
+
+        let startRow = min(beforeRow - 1, rowCount - 1)
+        var searchPosition = SearchPosition(startCol: terminal.cols, startRow: startRow)
+        var result = findInLine(term: term, searchPosition: &searchPosition, searchOptions: searchOptions, isReverseSearch: true)
+
+        if result == nil, startRow - 1 >= 0 {
+            for y in stride(from: startRow - 1, through: 0, by: -1) {
+                searchPosition.startRow = y
+                searchPosition.startCol = terminal.cols
+                result = findInLine(term: term, searchPosition: &searchPosition, searchOptions: searchOptions, isReverseSearch: true)
+                if result != nil {
+                    break
+                }
+            }
+        }
+
+        return result
+    }
+
+    func findNextAfterRow (term: String, searchOptions: SearchOptions? = nil, afterRow: Int) -> SearchResult? {
+        if term.isEmpty {
+            return nil
+        }
+
+        lineCache.initLinesCache()
+
+        let rowCount = terminal.displayBuffer.lines.count
+        let startRow = max(0, afterRow + 1)
+        guard startRow < rowCount else {
+            return nil
+        }
+
+        var searchPosition = SearchPosition(startCol: 0, startRow: startRow)
+        var result = findInLine(term: term, searchPosition: &searchPosition, searchOptions: searchOptions, isReverseSearch: false)
+
+        if result == nil, startRow + 1 < rowCount {
+            for y in (startRow + 1)..<rowCount {
+                searchPosition.startRow = y
+                searchPosition.startCol = 0
+                result = findInLine(term: term, searchPosition: &searchPosition, searchOptions: searchOptions, isReverseSearch: false)
                 if result != nil {
                     break
                 }

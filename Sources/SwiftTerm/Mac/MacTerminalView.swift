@@ -116,6 +116,8 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     private var findBarOptions: SearchOptions = SearchOptions()
     var debug: TerminalDebugView?
     var pendingDisplay: Bool = false
+    var lineInfoCache: [Int: LineInfoCacheEntry] = [:]
+    var lineInfoCacheGeneration: UInt64 = 0
 #if canImport(MetalKit)
     var metalView: MTKView?
     var metalRenderer: MetalTerminalRenderer?
@@ -664,6 +666,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// When true, block element (U+2580-U+259F) and box drawing (U+2500-U+257F) characters use custom rendering.
     public var customBlockGlyphs: Bool = true {
         didSet {
+            resetLineInfoCache()
             terminal.updateFullScreen()
             queuePendingDisplay()
         }
@@ -698,6 +701,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         }
         set {
             _selectedTextBackgroundColor = newValue
+            resetLineInfoCache()
         }
     }
 
@@ -937,6 +941,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     public var linkHighlightMode: LinkHighlightMode = .hoverWithModifier {
         didSet {
             linkHighlightRange = nil
+            resetLineInfoCache()
             updateLinkHighlightTracking()
             terminal.updateFullScreen()
             queuePendingDisplay()
@@ -1158,6 +1163,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
                 queuePendingDisplay()
             }
             if linkHighlightMode == .alwaysWithModifier {
+                resetLineInfoCache()
                 terminal.updateFullScreen()
                 queuePendingDisplay()
             }
@@ -1185,6 +1191,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
                 previewUrl (payload: payload)
             }
             if linkHighlightMode == .alwaysWithModifier {
+                resetLineInfoCache()
                 terminal.updateFullScreen()
                 queuePendingDisplay()
             }
@@ -2313,6 +2320,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     }
     
     open func selectionChanged(source: Terminal) {
+        resetLineInfoCache()
         #if canImport(MetalKit)
         if metalView != nil {
             let buffer = terminal.displayBuffer
