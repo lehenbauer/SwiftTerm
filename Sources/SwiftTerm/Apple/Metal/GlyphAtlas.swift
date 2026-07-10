@@ -43,12 +43,12 @@ enum GlyphAtlasFormat {
 final class GlyphAtlas {
     private static let glyphPadding = 1
 
-    private let device: MTLDevice
+    private let device: MTLDevice!
     private let format: GlyphAtlasFormat
     private let bytesPerPixel: Int
     private let maxSize: Int
     private(set) var size: Int
-    private(set) var texture: MTLTexture
+    private(set) var texture: MTLTexture!
     private var data: [UInt8]
     private var nextX = 0
     private var nextY = 0
@@ -68,6 +68,19 @@ final class GlyphAtlas {
         self.texture = texture
         self.data = Array(repeating: UInt8(0), count: self.size * self.size * bytesPerPixel)
     }
+
+#if DEBUG
+    init(cpuSize size: Int = 1024, maxSize: Int = 2048, format: GlyphAtlasFormat = .bgra) {
+        self.device = nil
+        self.format = format
+        self.bytesPerPixel = format.bytesPerPixel
+        let clampedMin = max(size, 256)
+        self.maxSize = max(maxSize, clampedMin)
+        self.size = clampedMin
+        self.texture = nil
+        self.data = Array(repeating: UInt8(0), count: self.size * self.size * bytesPerPixel)
+    }
+#endif
 
     func ensureRegion(width: Int, height: Int) -> AtlasRegion? {
         didReset = false
@@ -174,11 +187,13 @@ final class GlyphAtlas {
             }
         }
 
-        let regionMTL = MTLRegionMake2D(paddedX, paddedY, paddedWidth, paddedHeight)
-        let offset = (paddedY * atlasStride) + (paddedX * bytesPerPixel)
-        data.withUnsafeBytes { raw in
-            let base = raw.baseAddress!.advanced(by: offset)
-            texture.replace(region: regionMTL, mipmapLevel: 0, withBytes: base, bytesPerRow: atlasStride)
+        if let texture {
+            let regionMTL = MTLRegionMake2D(paddedX, paddedY, paddedWidth, paddedHeight)
+            let offset = (paddedY * atlasStride) + (paddedX * bytesPerPixel)
+            data.withUnsafeBytes { raw in
+                let base = raw.baseAddress!.advanced(by: offset)
+                texture.replace(region: regionMTL, mipmapLevel: 0, withBytes: base, bytesPerRow: atlasStride)
+            }
         }
     }
 
@@ -223,9 +238,8 @@ final class GlyphAtlas {
         guard newSize > size else {
             return
         }
-        guard let newTexture = GlyphAtlas.makeTexture(device: device, size: newSize, format: format) else {
-            return
-        }
+        let newTexture = device.flatMap { GlyphAtlas.makeTexture(device: $0, size: newSize, format: format) }
+        if device != nil && newTexture == nil { return }
         let newData = Array(repeating: UInt8(0), count: newSize * newSize * bytesPerPixel)
         var updatedData = newData
         let oldStride = size * bytesPerPixel
@@ -238,11 +252,13 @@ final class GlyphAtlas {
         size = newSize
         data = updatedData
         texture = newTexture
-        data.withUnsafeBytes { raw in
-            texture.replace(region: MTLRegionMake2D(0, 0, size, size),
-                            mipmapLevel: 0,
-                            withBytes: raw.baseAddress!,
-                            bytesPerRow: size * bytesPerPixel)
+        if let texture {
+            data.withUnsafeBytes { raw in
+                texture.replace(region: MTLRegionMake2D(0, 0, size, size),
+                                mipmapLevel: 0,
+                                withBytes: raw.baseAddress!,
+                                bytesPerRow: size * bytesPerPixel)
+            }
         }
     }
 
@@ -251,11 +267,13 @@ final class GlyphAtlas {
         nextY = 0
         rowHeight = 0
         data = Array(repeating: UInt8(0), count: size * size * bytesPerPixel)
-        data.withUnsafeBytes { raw in
-            texture.replace(region: MTLRegionMake2D(0, 0, size, size),
-                            mipmapLevel: 0,
-                            withBytes: raw.baseAddress!,
-                            bytesPerRow: size * bytesPerPixel)
+        if let texture {
+            data.withUnsafeBytes { raw in
+                texture.replace(region: MTLRegionMake2D(0, 0, size, size),
+                                mipmapLevel: 0,
+                                withBytes: raw.baseAddress!,
+                                bytesPerRow: size * bytesPerPixel)
+            }
         }
     }
 

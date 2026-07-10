@@ -14,7 +14,7 @@ import UIKit
 #endif
 
 struct GlyphKey: Hashable {
-    let fontName: String
+    let fontIdentifier: ObjectIdentifier
     let size: CGFloat
     let glyph: CGGlyph
 }
@@ -97,6 +97,7 @@ struct RowDrawBuffers {
 struct RowCacheEntry {
     var lineRef: BufferLine
     var generation: UInt64
+    var lineInfoGeneration: UInt64
     var data: RowDrawData?
     var buffers: RowDrawBuffers?
 }
@@ -175,7 +176,71 @@ struct CacheSignature: Hashable {
     let fontSize: Double
     let isAltBuffer: Bool
     let kittyStamp: KittyCacheStamp
+
+    func matchesIgnoringYDisp(_ other: CacheSignature) -> Bool {
+        scale == other.scale &&
+            cellWidth == other.cellWidth &&
+            cellHeight == other.cellHeight &&
+            viewWidth == other.viewWidth &&
+            viewHeight == other.viewHeight &&
+            rows == other.rows &&
+            cols == other.cols &&
+            fontName == other.fontName &&
+            fontSize == other.fontSize &&
+            isAltBuffer == other.isAltBuffer &&
+            kittyStamp == other.kittyStamp
+    }
 }
+
+#if DEBUG
+struct MetalRendererDebugMetrics {
+    let drawCalls: Int
+    let buildCalls: Int
+    let drawsPerSecond: Double
+    let visibleRows: Int
+    let rowsRebuilt: Int
+    let rowsCached: Int
+    let maxRowsRebuiltPerBuild: Int
+    let dirtyRowsRequested: Int
+    let signatureInvalidations: Int
+    let yDispOnlySignatureInvalidations: Int
+    let yDispChanges: Int
+    let scrollRemapBuilds: Int
+    let rowsRemapped: Int
+    let buildsWithoutDirtyRows: Int
+    let glyphCacheHits: Int
+    let glyphCacheMisses: Int
+    let scaledFontCacheHits: Int
+    let scaledFontCacheMisses: Int
+    let shaperCacheHits: Int
+    let shaperCacheMisses: Int
+    let postScriptNameCalls: Int
+}
+
+struct MetalRendererDebugImageSnapshot: Equatable {
+    let texture: ObjectIdentifier
+    let vertices: [Float]
+}
+
+struct MetalRendererDebugRowSnapshot: Equatable {
+    let row: Int
+    let backgroundCells: [Float]
+    let glyphCellsGray: [Float]
+    let glyphCellsColor: [Float]
+    let decorationCells: [Float]
+    let underImages: [MetalRendererDebugImageSnapshot]
+    let placeholderImages: [MetalRendererDebugImageSnapshot]
+    let overImages: [MetalRendererDebugImageSnapshot]
+    let otherImages: [MetalRendererDebugImageSnapshot]
+}
+
+struct MetalRendererDebugDrawSnapshot: Equatable {
+    let rows: [MetalRendererDebugRowSnapshot]
+    let cursorColors: [Float]
+    let cursorGlyphsGray: [Float]
+    let cursorGlyphsColor: [Float]
+}
+#endif
 
 final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     private static let cursorBlinkInterval: TimeInterval = 0.7
@@ -185,17 +250,17 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
 #endif
     private weak var terminalView: TerminalView?
     private weak var view: MTKView?
-    private let device: MTLDevice
-    private let commandQueue: MTLCommandQueue
-    private let textPipeline: MTLRenderPipelineState
-    private let textGrayPipeline: MTLRenderPipelineState
-    private let colorPipeline: MTLRenderPipelineState
-    private let cellTextPipeline: MTLRenderPipelineState
-    private let cellTextGrayPipeline: MTLRenderPipelineState
-    private let cellColorPipeline: MTLRenderPipelineState
-    private let sampler: MTLSamplerState
-    private let textureLoader: MTKTextureLoader
-    private let bufferPool: BufferPool
+    private let device: MTLDevice!
+    private let commandQueue: MTLCommandQueue!
+    private let textPipeline: MTLRenderPipelineState!
+    private let textGrayPipeline: MTLRenderPipelineState!
+    private let colorPipeline: MTLRenderPipelineState!
+    private let cellTextPipeline: MTLRenderPipelineState!
+    private let cellTextGrayPipeline: MTLRenderPipelineState!
+    private let cellColorPipeline: MTLRenderPipelineState!
+    private let sampler: MTLSamplerState!
+    private let textureLoader: MTKTextureLoader!
+    private let bufferPool: BufferPool!
     private let shaperCache = ShaperCache(maxEntries: 2048)
     private let grayscaleAtlas: GlyphAtlas
     private let colorAtlas: GlyphAtlas
@@ -203,6 +268,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     private var glyphCache: [GlyphKey: GlyphEntry] = [:]
     private var scaledFontCache: [GlyphKey: CTFont] = [:]
     private var customGlyphCache: [CustomGlyphKey: CustomGlyphEntry] = [:]
+    private var retainedFonts: [ObjectIdentifier: CTFont] = [:]
     private let imageTextureCache = NSMapTable<AnyObject, MTLTexture>(keyOptions: .weakMemory, valueOptions: .strongMemory)
     private var kittyTextureCache: [UInt32: (signature: KittyImageSignature, texture: MTLTexture)] = [:]
     private var rowCache: [Int: RowCacheEntry] = [:]
@@ -219,8 +285,28 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
 #if DEBUG
     private var debugFrameCount = 0
     private var debugLastLogTime = CFAbsoluteTimeGetCurrent()
+    private var debugDrawCalls = 0
+    private var debugBuildCalls = 0
+    private var debugDrawsPerSecond = 0.0
     private var debugRowsRebuilt = 0
     private var debugRowsCached = 0
+    private var debugVisibleRows = 0
+    private var debugTotalRowsRebuilt = 0
+    private var debugTotalRowsCached = 0
+    private var debugMaxRowsRebuiltPerBuild = 0
+    private var debugDirtyRowsRequested = 0
+    private var debugSignatureInvalidations = 0
+    private var debugYDispOnlySignatureInvalidations = 0
+    private var debugYDispChanges = 0
+    private var debugScrollRemapBuilds = 0
+    private var debugRowsRemapped = 0
+    private var debugBuildsWithoutDirtyRows = 0
+    private var debugGlyphCacheHits = 0
+    private var debugGlyphCacheMisses = 0
+    private var debugScaledFontCacheHits = 0
+    private var debugScaledFontCacheMisses = 0
+    private var debugPostScriptNameCalls = 0
+    private var debugLegacyBenchmarkMode = false
 #endif
 #if DEBUG
     private var imageTextureFailures: Set<ObjectIdentifier> = []
@@ -298,6 +384,27 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         super.init()
     }
 
+#if DEBUG
+    init(debugTerminalView terminalView: TerminalView) {
+        self.device = nil
+        self.commandQueue = nil
+        self.textPipeline = nil
+        self.textGrayPipeline = nil
+        self.colorPipeline = nil
+        self.cellTextPipeline = nil
+        self.cellTextGrayPipeline = nil
+        self.cellColorPipeline = nil
+        self.sampler = nil
+        self.textureLoader = nil
+        self.bufferPool = nil
+        self.grayscaleAtlas = GlyphAtlas(cpuSize: 1024, format: .grayscale)
+        self.colorAtlas = GlyphAtlas(cpuSize: 1024, format: .bgra)
+        self.terminalView = terminalView
+        self.view = nil
+        super.init()
+    }
+#endif
+
     deinit {
         cursorBlinkTimer?.invalidate()
     }
@@ -307,6 +414,17 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     }
 
     func draw(in view: MTKView) {
+#if DEBUG
+        debugDrawCalls += 1
+        debugFrameCount += 1
+        let debugNow = CFAbsoluteTimeGetCurrent()
+        let debugElapsed = debugNow - debugLastLogTime
+        if debugElapsed >= 1.0 {
+            debugDrawsPerSecond = Double(debugFrameCount) / debugElapsed
+            debugFrameCount = 0
+            debugLastLogTime = debugNow
+        }
+#endif
 #if canImport(os)
         let drawID = OSSignpostID(log: MetalTerminalRenderer.profileLog)
         if MetalTerminalRenderer.profileEnabled {
@@ -384,15 +502,6 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
 #if canImport(os)
         if MetalTerminalRenderer.profileEnabled {
             os_signpost(.end, log: MetalTerminalRenderer.profileLog, name: "Metal.BuildDrawData", signpostID: buildID)
-        }
-#endif
-#if DEBUG
-        debugFrameCount += 1
-        let now = CFAbsoluteTimeGetCurrent()
-        let elapsed = now - debugLastLogTime
-        if elapsed >= 1.0 {
-            debugFrameCount = 0
-            debugLastLogTime = now
         }
 #endif
         let bgColor = colorToSIMD(terminalView.nativeBackgroundColor)
@@ -558,6 +667,9 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     }
 
     private func buildDrawData(scale: CGFloat) -> DrawData {
+#if DEBUG
+        debugBuildCalls += 1
+#endif
         guard let terminalView = terminalView else {
 #if DEBUG
             debugRowsRebuilt = 0
@@ -618,13 +730,55 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                        fontSize: Double(terminalView.fontSet.normal.pointSize),
                                        isAltBuffer: terminalView.terminal.isCurrentBufferAlternate,
                                        kittyStamp: kittyStamp)
-        let signatureChanged = signature != cacheSignature
-        if signatureChanged {
-            rowCache.removeAll()
-            cacheSignature = signature
+        let previousSignature = cacheSignature
+#if DEBUG
+        let legacyBenchmarkMode = debugLegacyBenchmarkMode
+        let signatureChanged = legacyBenchmarkMode
+            ? signature != previousSignature
+            : previousSignature == nil || !(previousSignature?.matchesIgnoringYDisp(signature) ?? false)
+#else
+        let legacyBenchmarkMode = false
+        let signatureChanged = previousSignature == nil ||
+            !(previousSignature?.matchesIgnoringYDisp(signature) ?? false)
+#endif
+        let yDispChanged = previousSignature.map { $0.yDisp != signature.yDisp } ?? false
+#if DEBUG
+        if yDispChanged {
+            debugYDispChanges += 1
         }
+#endif
+        if signatureChanged {
+#if DEBUG
+            debugSignatureInvalidations += 1
+            if legacyBenchmarkMode,
+               let previousSignature,
+               previousSignature.yDisp != signature.yDisp,
+               previousSignature.matchesIgnoringYDisp(signature) {
+                debugYDispOnlySignatureInvalidations += 1
+            }
+#endif
+            rowCache.removeAll()
+        }
+        cacheSignature = signature
 
         let visibleRange = firstRow...lastRow
+        let remappedRows: Int
+        if !legacyBenchmarkMode, !signatureChanged, let previousSignature, !rowCache.isEmpty {
+            remappedRows = remapCachedRows(buffer: buffer,
+                                           visibleRange: visibleRange,
+                                           oldYDisp: previousSignature.yDisp,
+                                           newYDisp: visibleDisp,
+                                           cellHeight: cellHeight,
+                                           scale: scale)
+        } else {
+            remappedRows = 0
+        }
+#if DEBUG
+        if remappedRows > 0 {
+            debugScrollRemapBuilds += 1
+            debugRowsRemapped += remappedRows
+        }
+#endif
         terminalView.pruneLineInfoCache(to: visibleRange)
         if !rowCache.isEmpty {
             rowCache = rowCache.filter { visibleRange.contains($0.key) }
@@ -633,7 +787,26 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         let dirtyRange = terminalView.metalDirtyRange
         terminalView.metalDirtyRange = nil
         let needsFullRebuild = signatureChanged || rowCache.isEmpty
-        let rebuildRange = needsFullRebuild ? visibleRange : intersect(dirtyRange, visibleRange)
+        let dirtyVisibleRange = intersect(dirtyRange, visibleRange)
+        let dirtyIsFullViewport = dirtyVisibleRange == visibleRange
+        // Terminal scrolling marks the whole viewport dirty, but after remapping
+        // unchanged BufferLine instances that range contains no extra information.
+        // Line identity/generation and line-info generation remain authoritative;
+        // non-full dirty ranges still cover selection/link-only redraws.
+        let canReuseFullScrollDirtyRange = remappedRows > 0 &&
+            dirtyIsFullViewport &&
+            !terminalView.selection.active
+        let effectiveDirtyRange = canReuseFullScrollDirtyRange ? nil : dirtyVisibleRange
+        let rebuildRange = needsFullRebuild ? visibleRange : effectiveDirtyRange
+#if DEBUG
+        debugVisibleRows += visibleRange.count
+        if let dirtyVisibleRange {
+            debugDirtyRowsRequested += dirtyVisibleRange.count
+        }
+        if !signatureChanged && dirtyRange == nil && !rowCache.isEmpty {
+            debugBuildsWithoutDirtyRows += 1
+        }
+#endif
 
         var rows: [RowDrawBuffers] = []
         var frameData: FrameDrawData?
@@ -665,7 +838,9 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             // Cache is valid only when the absolute row still maps to the same
             // BufferLine instance (scrolls rotate refs in the CircularList) and
             // that line has not been mutated since we cached its draw data.
-            let cacheValid = entry?.lineRef === line && entry?.generation == lineGeneration
+            let cacheValid = entry?.lineRef === line &&
+                entry?.generation == lineGeneration &&
+                entry?.lineInfoGeneration == terminalView.lineInfoCacheGeneration
             let needsRebuild = needsFullRebuild ||
                 (rebuildRange?.contains(row) ?? false) ||
                 !cacheValid ||
@@ -682,8 +857,14 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                            viewWidthPx: viewWidthPx,
                                            scale: scale,
                                            virtualPlacementsByImageId: virtualPlacementsByImageId)
-                let buffers = bufferingMode == .perRowPersistent ? makeRowBuffers(from: rowData) : nil
-                entry = RowCacheEntry(lineRef: line, generation: lineGeneration, data: rowData, buffers: buffers)
+                let buffers = bufferingMode == .perRowPersistent && device != nil
+                    ? makeRowBuffers(from: rowData)
+                    : nil
+                entry = RowCacheEntry(lineRef: line,
+                                      generation: lineGeneration,
+                                      lineInfoGeneration: terminalView.lineInfoCacheGeneration,
+                                      data: rowData,
+                                      buffers: buffers)
                 rowCache[row] = entry
                 rowBuffers = buffers
                 rebuiltRows += 1
@@ -698,17 +879,23 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                                           scale: scale,
                                                           virtualPlacementsByImageId: virtualPlacementsByImageId)
                 if cached.data == nil {
-                    entry = RowCacheEntry(lineRef: line, generation: lineGeneration, data: rowData, buffers: cached.buffers)
+                    entry = RowCacheEntry(lineRef: line,
+                                          generation: lineGeneration,
+                                          lineInfoGeneration: terminalView.lineInfoCacheGeneration,
+                                          data: rowData,
+                                          buffers: cached.buffers)
                     rowCache[row] = entry
                 }
                 if bufferingMode == .perRowPersistent {
                     if let buffers = cached.buffers {
                         rowBuffers = buffers
-                    } else {
+                    } else if device != nil {
                         let buffers = makeRowBuffers(from: rowData)
                         entry?.buffers = buffers
                         rowCache[row] = entry
                         rowBuffers = buffers
+                    } else {
+                        rowBuffers = nil
                     }
                 } else {
                     rowBuffers = nil
@@ -724,8 +911,14 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                            viewWidthPx: viewWidthPx,
                                            scale: scale,
                                            virtualPlacementsByImageId: virtualPlacementsByImageId)
-                let buffers = bufferingMode == .perRowPersistent ? makeRowBuffers(from: rowData) : nil
-                entry = RowCacheEntry(lineRef: line, generation: lineGeneration, data: rowData, buffers: buffers)
+                let buffers = bufferingMode == .perRowPersistent && device != nil
+                    ? makeRowBuffers(from: rowData)
+                    : nil
+                entry = RowCacheEntry(lineRef: line,
+                                      generation: lineGeneration,
+                                      lineInfoGeneration: terminalView.lineInfoCacheGeneration,
+                                      data: rowData,
+                                      buffers: buffers)
                 rowCache[row] = entry
                 rowBuffers = buffers
                 rebuiltRows += 1
@@ -750,6 +943,9 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
 #if DEBUG
         debugRowsRebuilt = rebuiltRows
         debugRowsCached = cachedRows
+        debugTotalRowsRebuilt += rebuiltRows
+        debugTotalRowsCached += cachedRows
+        debugMaxRowsRebuiltPerBuild = max(debugMaxRowsRebuiltPerBuild, rebuiltRows)
 #endif
 
         let cursorData = buildCursorDrawData(scale: scale,
@@ -774,6 +970,215 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         atlasResetHandled = false
         return result
     }
+
+    private func remapCachedRows(buffer: Buffer,
+                                 visibleRange: ClosedRange<Int>,
+                                 oldYDisp: Int,
+                                 newYDisp: Int,
+                                 cellHeight: CGFloat,
+                                 scale: CGFloat) -> Int {
+        var cachedByLine: [ObjectIdentifier: (row: Int, entry: RowCacheEntry)] = [:]
+        cachedByLine.reserveCapacity(rowCache.count)
+        for (row, entry) in rowCache {
+            cachedByLine[ObjectIdentifier(entry.lineRef)] = (row, entry)
+        }
+
+        var remapped: [Int: RowCacheEntry] = [:]
+        remapped.reserveCapacity(visibleRange.count)
+        var shiftedRows = 0
+        for row in visibleRange {
+            let line = buffer.lines[row]
+            guard var cached = cachedByLine[ObjectIdentifier(line)],
+                  cached.entry.lineRef === line,
+                  cached.entry.generation == line.generation else {
+                continue
+            }
+            let oldScreenRow = cached.row - oldYDisp
+            let newScreenRow = row - newYDisp
+            let screenRowShift = oldScreenRow - newScreenRow
+            if screenRowShift != 0 {
+                let yOffset = Float(cellHeight * scale * CGFloat(screenRowShift))
+                translateCachedRow(&cached.entry, yOffset: yOffset)
+                shiftedRows += 1
+            }
+            remapped[row] = cached.entry
+        }
+        rowCache = remapped
+        return shiftedRows
+    }
+
+    private func translateCachedRow(_ entry: inout RowCacheEntry, yOffset: Float) {
+        guard var data = entry.data else {
+            return
+        }
+        translate(&data.backgroundCells, yOffset: yOffset)
+        translate(&data.glyphCellsGray, yOffset: yOffset)
+        translate(&data.glyphCellsColor, yOffset: yOffset)
+        translate(&data.decorationCells, yOffset: yOffset)
+        data.underImageDraws = translated(data.underImageDraws, yOffset: yOffset)
+        data.placeholderImageDraws = translated(data.placeholderImageDraws, yOffset: yOffset)
+        data.overImageDraws = translated(data.overImageDraws, yOffset: yOffset)
+        data.otherImageDraws = translated(data.otherImageDraws, yOffset: yOffset)
+        entry.data = data
+        if let buffers = entry.buffers, !rewrite(buffers: buffers, from: data) {
+            entry.buffers = makeRowBuffers(from: data)
+        }
+    }
+
+    private func translate(_ cells: inout [ColorCell], yOffset: Float) {
+        for index in cells.indices {
+            cells[index].position.y += yOffset
+        }
+    }
+
+    private func translate(_ cells: inout [TextCell], yOffset: Float) {
+        for index in cells.indices {
+            cells[index].position.y += yOffset
+        }
+    }
+
+    private func translated(_ draws: [ImageDraw], yOffset: Float) -> [ImageDraw] {
+        draws.map { draw in
+            var vertices = draw.vertices
+            for index in vertices.indices {
+                vertices[index].position.y += yOffset
+            }
+            return ImageDraw(texture: draw.texture, vertices: vertices)
+        }
+    }
+
+#if DEBUG
+    func debugResetMetrics() {
+        debugFrameCount = 0
+        debugLastLogTime = CFAbsoluteTimeGetCurrent()
+        debugDrawCalls = 0
+        debugBuildCalls = 0
+        debugDrawsPerSecond = 0
+        debugRowsRebuilt = 0
+        debugRowsCached = 0
+        debugVisibleRows = 0
+        debugTotalRowsRebuilt = 0
+        debugTotalRowsCached = 0
+        debugMaxRowsRebuiltPerBuild = 0
+        debugDirtyRowsRequested = 0
+        debugSignatureInvalidations = 0
+        debugYDispOnlySignatureInvalidations = 0
+        debugYDispChanges = 0
+        debugScrollRemapBuilds = 0
+        debugRowsRemapped = 0
+        debugBuildsWithoutDirtyRows = 0
+        debugGlyphCacheHits = 0
+        debugGlyphCacheMisses = 0
+        debugScaledFontCacheHits = 0
+        debugScaledFontCacheMisses = 0
+        debugPostScriptNameCalls = 0
+        shaperCache.debugResetMetrics()
+    }
+
+    func debugSetLegacyBenchmarkMode(_ enabled: Bool) {
+        debugLegacyBenchmarkMode = enabled
+        rowCache.removeAll()
+        cacheSignature = nil
+    }
+
+    func debugMetricsSnapshot() -> MetalRendererDebugMetrics {
+        MetalRendererDebugMetrics(
+            drawCalls: debugDrawCalls,
+            buildCalls: debugBuildCalls,
+            drawsPerSecond: debugDrawsPerSecond,
+            visibleRows: debugVisibleRows,
+            rowsRebuilt: debugTotalRowsRebuilt,
+            rowsCached: debugTotalRowsCached,
+            maxRowsRebuiltPerBuild: debugMaxRowsRebuiltPerBuild,
+            dirtyRowsRequested: debugDirtyRowsRequested,
+            signatureInvalidations: debugSignatureInvalidations,
+            yDispOnlySignatureInvalidations: debugYDispOnlySignatureInvalidations,
+            yDispChanges: debugYDispChanges,
+            scrollRemapBuilds: debugScrollRemapBuilds,
+            rowsRemapped: debugRowsRemapped,
+            buildsWithoutDirtyRows: debugBuildsWithoutDirtyRows,
+            glyphCacheHits: debugGlyphCacheHits,
+            glyphCacheMisses: debugGlyphCacheMisses,
+            scaledFontCacheHits: debugScaledFontCacheHits,
+            scaledFontCacheMisses: debugScaledFontCacheMisses,
+            shaperCacheHits: shaperCache.debugCacheHits,
+            shaperCacheMisses: shaperCache.debugCacheMisses,
+            postScriptNameCalls: debugPostScriptNameCalls + shaperCache.debugPostScriptNameCalls
+        )
+    }
+
+    func debugBuildSnapshot(scale: CGFloat, forceFullRebuild: Bool = false) -> MetalRendererDebugDrawSnapshot {
+        if forceFullRebuild {
+            rowCache.removeAll()
+        }
+        let drawData = buildDrawData(scale: scale)
+        let rowSnapshots = rowCache.keys.sorted().compactMap { row -> MetalRendererDebugRowSnapshot? in
+            guard let data = rowCache[row]?.data else {
+                return nil
+            }
+            return MetalRendererDebugRowSnapshot(
+                row: row,
+                backgroundCells: debugFlatten(data.backgroundCells),
+                glyphCellsGray: debugFlatten(data.glyphCellsGray),
+                glyphCellsColor: debugFlatten(data.glyphCellsColor),
+                decorationCells: debugFlatten(data.decorationCells),
+                underImages: debugSnapshot(data.underImageDraws),
+                placeholderImages: debugSnapshot(data.placeholderImageDraws),
+                overImages: debugSnapshot(data.overImageDraws),
+                otherImages: debugSnapshot(data.otherImageDraws)
+            )
+        }
+        return MetalRendererDebugDrawSnapshot(
+            rows: rowSnapshots,
+            cursorColors: debugFlatten(drawData.cursorColorVertices),
+            cursorGlyphsGray: debugFlatten(drawData.cursorGlyphVerticesGray),
+            cursorGlyphsColor: debugFlatten(drawData.cursorGlyphVerticesColor)
+        )
+    }
+
+    func debugBuildOnly(scale: CGFloat) {
+        _ = buildDrawData(scale: scale)
+    }
+
+    private func debugQuantize(_ value: Float) -> Float {
+        (value * 1_000).rounded() / 1_000
+    }
+
+    private func debugFlatten(_ cells: [ColorCell]) -> [Float] {
+        cells.flatMap {
+            [$0.position.x, $0.position.y, $0.size.x, $0.size.y,
+             $0.color.x, $0.color.y, $0.color.z, $0.color.w].map(debugQuantize)
+        }
+    }
+
+    private func debugFlatten(_ cells: [TextCell]) -> [Float] {
+        cells.flatMap {
+            [$0.position.x, $0.position.y, $0.size.x, $0.size.y,
+             $0.texOrigin.x, $0.texOrigin.y, $0.texSize.x, $0.texSize.y,
+             $0.color.x, $0.color.y, $0.color.z, $0.color.w].map(debugQuantize)
+        }
+    }
+
+    private func debugFlatten(_ vertices: [ColorVertex]) -> [Float] {
+        vertices.flatMap {
+            [$0.position.x, $0.position.y, $0.color.x, $0.color.y, $0.color.z, $0.color.w].map(debugQuantize)
+        }
+    }
+
+    private func debugFlatten(_ vertices: [GlyphVertex]) -> [Float] {
+        vertices.flatMap {
+            [$0.position.x, $0.position.y, $0.texCoord.x, $0.texCoord.y,
+             $0.color.x, $0.color.y, $0.color.z, $0.color.w].map(debugQuantize)
+        }
+    }
+
+    private func debugSnapshot(_ draws: [ImageDraw]) -> [MetalRendererDebugImageSnapshot] {
+        draws.map {
+            MetalRendererDebugImageSnapshot(texture: ObjectIdentifier($0.texture as AnyObject),
+                                            vertices: debugFlatten($0.vertices))
+        }
+    }
+#endif
 
     private func intersect(_ range: ClosedRange<Int>?, _ other: ClosedRange<Int>) -> ClosedRange<Int>? {
         guard let range else {
@@ -1418,7 +1823,10 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                     return
                 }
                 let runFont = attributes[.font] as? TTFont ?? terminalView.fontSet.normal
-                guard let shaped = shaperCache.shape(text: text, font: runFont as CTFont) else {
+                let ctFont = runFont as CTFont
+                guard let shaped = shaperCache.shape(text: text,
+                                                     font: ctFont,
+                                                     fontIdentifier: fontIdentifier(for: ctFont)) else {
                     return
                 }
                 shapedRuns.append(ShapedRun(attributes: attributes, shaperRun: shaped))
@@ -1431,12 +1839,18 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     }
 
     private func glyphEntry(for font: CTFont, glyph: CGGlyph) -> GlyphEntry? {
-        let key = GlyphKey(fontName: CTFontCopyPostScriptName(font) as String,
+        let key = GlyphKey(fontIdentifier: fontIdentifier(for: font),
                            size: CTFontGetSize(font),
                            glyph: glyph)
         if let cached = glyphCache[key] {
+#if DEBUG
+            debugGlyphCacheHits += 1
+#endif
             return cached
         }
+#if DEBUG
+        debugGlyphCacheMisses += 1
+#endif
         guard let bitmap = rasterizer.rasterize(font: font, glyph: glyph) else {
             return nil
         }
@@ -1463,15 +1877,37 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     }
 
     private func scaledFontFor(font: CTFont, scale: CGFloat) -> CTFont {
-        let key = GlyphKey(fontName: CTFontCopyPostScriptName(font) as String,
+        let key = GlyphKey(fontIdentifier: fontIdentifier(for: font),
                            size: CTFontGetSize(font) * scale,
                            glyph: 0)
         if let cached = scaledFontCache[key] {
+#if DEBUG
+            debugScaledFontCacheHits += 1
+#endif
             return cached
         }
+#if DEBUG
+        debugScaledFontCacheMisses += 1
+#endif
         let scaled = CTFontCreateCopyWithAttributes(font, CTFontGetSize(font) * scale, nil, nil)
         scaledFontCache[key] = scaled
         return scaled
+    }
+
+    private func fontIdentifier(for font: CTFont) -> ObjectIdentifier {
+#if DEBUG
+        if debugLegacyBenchmarkMode {
+            _ = CTFontCopyPostScriptName(font) as String
+            debugPostScriptNameCalls += 1
+        }
+#endif
+        let identifier = ObjectIdentifier(font)
+        if retainedFonts[identifier] == nil {
+            // Retain every keyed font for the renderer lifetime so an object
+            // address cannot be recycled into a false cache hit.
+            retainedFonts[identifier] = font
+        }
+        return identifier
     }
 
     private func alignToPixel(_ value: CGFloat, scale: CGFloat, rule: FloatingPointRoundingRule) -> CGFloat {
@@ -1753,7 +2189,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     }
 
     private struct ShaperKey: Hashable {
-        let fontName: String
+        let fontIdentifier: ObjectIdentifier
         let fontSize: CGFloat
         let text: String
     }
@@ -1784,21 +2220,32 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         private let maxEntries: Int
         private var cache: [ShaperKey: ShaperRun] = [:]
         private var order: [ShaperKey] = []
+#if DEBUG
+        private(set) var debugCacheHits = 0
+        private(set) var debugCacheMisses = 0
+        private(set) var debugPostScriptNameCalls = 0
+#endif
 
         init(maxEntries: Int) {
             self.maxEntries = maxEntries
         }
 
-        func shape(text: String, font: CTFont) -> ShaperRun? {
+        func shape(text: String, font: CTFont, fontIdentifier: ObjectIdentifier) -> ShaperRun? {
             guard !text.isEmpty else {
                 return nil
             }
-            let key = ShaperKey(fontName: CTFontCopyPostScriptName(font) as String,
+            let key = ShaperKey(fontIdentifier: fontIdentifier,
                                 fontSize: CTFontGetSize(font),
                                 text: text)
             if let cached = cache[key] {
+#if DEBUG
+                debugCacheHits += 1
+#endif
                 return cached
             }
+#if DEBUG
+            debugCacheMisses += 1
+#endif
 
             let attributedString = NSAttributedString(string: text, attributes: [.font: font])
             let line = CTLineCreateWithAttributedString(attributedString)
@@ -1836,6 +2283,14 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             insert(key: key, run: result)
             return result
         }
+
+#if DEBUG
+        func debugResetMetrics() {
+            debugCacheHits = 0
+            debugCacheMisses = 0
+            debugPostScriptNameCalls = 0
+        }
+#endif
 
         private func insert(key: ShaperKey, run: ShaperRun) {
             if cache[key] == nil {
@@ -1936,6 +2391,57 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                               placeholderImageBuffers: makeImageDrawBuffers(data.placeholderImageDraws),
                               overImageBuffers: makeImageDrawBuffers(data.overImageDraws),
                               otherImageBuffers: makeImageDrawBuffers(data.otherImageDraws))
+    }
+
+    private func rewrite(buffers: RowDrawBuffers, from data: RowDrawData) -> Bool {
+        rewrite(buffer: buffers.backgroundBuffer,
+                expectedCount: buffers.backgroundCount,
+                values: data.backgroundCells) &&
+            rewrite(buffer: buffers.glyphGrayBuffer,
+                    expectedCount: buffers.glyphGrayCount,
+                    values: data.glyphCellsGray) &&
+            rewrite(buffer: buffers.glyphColorBuffer,
+                    expectedCount: buffers.glyphColorCount,
+                    values: data.glyphCellsColor) &&
+            rewrite(buffer: buffers.decorationBuffer,
+                    expectedCount: buffers.decorationCount,
+                    values: data.decorationCells) &&
+            rewrite(imageBuffers: buffers.underImageBuffers, draws: data.underImageDraws) &&
+            rewrite(imageBuffers: buffers.placeholderImageBuffers, draws: data.placeholderImageDraws) &&
+            rewrite(imageBuffers: buffers.overImageBuffers, draws: data.overImageDraws) &&
+            rewrite(imageBuffers: buffers.otherImageBuffers, draws: data.otherImageDraws)
+    }
+
+    private func rewrite<T>(buffer: MTLBuffer?, expectedCount: Int, values: [T]) -> Bool {
+        guard expectedCount == values.count else {
+            return false
+        }
+        guard !values.isEmpty else {
+            return buffer == nil
+        }
+        let byteCount = values.count * MemoryLayout<T>.stride
+        guard let buffer, buffer.length >= byteCount else {
+            return false
+        }
+        values.withUnsafeBytes { raw in
+            _ = memcpy(buffer.contents(), raw.baseAddress!, byteCount)
+        }
+        return true
+    }
+
+    private func rewrite(imageBuffers: [ImageDrawBuffer], draws: [ImageDraw]) -> Bool {
+        guard imageBuffers.count == draws.count else {
+            return false
+        }
+        for (buffer, draw) in zip(imageBuffers, draws) {
+            guard ObjectIdentifier(buffer.texture as AnyObject) == ObjectIdentifier(draw.texture as AnyObject),
+                  rewrite(buffer: buffer.buffer,
+                          expectedCount: buffer.vertexCount,
+                          values: draw.vertices) else {
+                return false
+            }
+        }
+        return true
     }
 
     private func drawCellBuffer<T>(_ cells: [T],
