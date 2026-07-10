@@ -153,11 +153,28 @@ final class KittyGraphicsState {
     }
     var totalImageBytes: Int = 0
     var nextImageAccessTick: UInt64 = 1
+    private var suppressMutationAdvance = false
 
     private func advanceMutationGeneration() {
+        if suppressMutationAdvance {
+            return
+        }
         mutationGenerationLock.lock()
         _mutationGeneration &+= 1
         mutationGenerationLock.unlock()
+    }
+
+    /// LRU access-tick bookkeeping does not change rendered output, so it must
+    /// not advance the render generation and invalidate cached rows.
+    func updateImageAccessTick(imageId: UInt32, tick: UInt64) -> KittyGraphicsImage? {
+        guard var image = imagesById[imageId] else {
+            return nil
+        }
+        image.lastAccessTick = tick
+        suppressMutationAdvance = true
+        imagesById[imageId] = image
+        suppressMutationAdvance = false
+        return image
     }
 }
 
@@ -1774,12 +1791,11 @@ extension Terminal {
     }
 
     private func updateKittyImageAccess(imageId: UInt32) -> KittyGraphicsImage? {
-        guard var image = kittyGraphicsState.imagesById[imageId] else {
+        guard kittyGraphicsState.imagesById[imageId] != nil else {
             return nil
         }
-        image.lastAccessTick = nextKittyImageAccessTick()
-        kittyGraphicsState.imagesById[imageId] = image
-        return image
+        return kittyGraphicsState.updateImageAccessTick(imageId: imageId,
+                                                        tick: nextKittyImageAccessTick())
     }
 
     private func kittyPayloadByteSize(_ payload: KittyGraphicsPayload) -> Int {
