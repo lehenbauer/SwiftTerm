@@ -122,6 +122,7 @@ enum KittyGraphicsPayload {
 struct KittyGraphicsImage {
     let payload: KittyGraphicsPayload
     let byteSize: Int
+    let payloadHash: UInt64
     var lastAccessTick: UInt64
 }
 
@@ -131,14 +132,33 @@ struct KittyGraphicsPending {
 }
 
 final class KittyGraphicsState {
-    var imagesById: [UInt32: KittyGraphicsImage] = [:]
+    private let mutationGenerationLock = NSLock()
+    private var _mutationGeneration: UInt64 = 0
+
+    var mutationGeneration: UInt64 {
+        mutationGenerationLock.lock()
+        defer { mutationGenerationLock.unlock() }
+        return _mutationGeneration
+    }
+
+    var imagesById: [UInt32: KittyGraphicsImage] = [:] {
+        didSet { advanceMutationGeneration() }
+    }
     var imageNumbers: [UInt32: UInt32] = [:]
     var nextImageId: UInt32 = 1
     var nextPlacementId: UInt32 = 1
     var pending: KittyGraphicsPending?
-    var placementsByKey: [KittyPlacementKey: KittyPlacementRecord] = [:]
+    var placementsByKey: [KittyPlacementKey: KittyPlacementRecord] = [:] {
+        didSet { advanceMutationGeneration() }
+    }
     var totalImageBytes: Int = 0
     var nextImageAccessTick: UInt64 = 1
+
+    private func advanceMutationGeneration() {
+        mutationGenerationLock.lock()
+        _mutationGeneration &+= 1
+        mutationGenerationLock.unlock()
+    }
 }
 
 extension Terminal {
@@ -1737,12 +1757,14 @@ extension Terminal {
 
     private func storeKittyImage(payload: KittyGraphicsPayload, imageId: UInt32, imageNumber: UInt32?) {
         let byteSize = kittyPayloadByteSize(payload)
+        let payloadHash = kittyPayloadHash(payload)
         let lastAccessTick = nextKittyImageAccessTick()
         if let existing = kittyGraphicsState.imagesById[imageId] {
             kittyGraphicsState.totalImageBytes = max(0, kittyGraphicsState.totalImageBytes - existing.byteSize)
         }
         kittyGraphicsState.imagesById[imageId] = KittyGraphicsImage(payload: payload,
                                                                    byteSize: byteSize,
+                                                                   payloadHash: payloadHash,
                                                                    lastAccessTick: lastAccessTick)
         kittyGraphicsState.totalImageBytes += byteSize
         if let number = imageNumber {
@@ -1767,6 +1789,21 @@ extension Terminal {
         case .rgba(let bytes, _, _):
             return bytes.count
         }
+    }
+
+    private func kittyPayloadHash(_ payload: KittyGraphicsPayload) -> UInt64 {
+        var hash: UInt64 = 14695981039346656037
+        let update: (UInt8) -> Void = { byte in
+            hash ^= UInt64(byte)
+            hash &*= 1099511628211
+        }
+        switch payload {
+        case .png(let data):
+            data.forEach(update)
+        case .rgba(let bytes, _, _):
+            bytes.forEach(update)
+        }
+        return hash
     }
 
     private func nextKittyImageAccessTick() -> UInt64 {

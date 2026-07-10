@@ -118,6 +118,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     var pendingDisplay: Bool = false
     var lineInfoCache: [Int: LineInfoCacheEntry] = [:]
     var lineInfoCacheGeneration: UInt64 = 0
+    var lineInfoInvalidationGenerations: [ObjectIdentifier: UInt64] = [:]
 #if canImport(MetalKit)
     var metalView: MTKView?
     var metalRenderer: MetalTerminalRenderer?
@@ -132,6 +133,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// we rebuild the MTKView so a fresh CAMetalLayer binds to it.
     private weak var metalBoundWindow: NSWindow?
     var metalDirtyRange: ClosedRange<Int>?
+    var metalDirtyRangeFullRefreshGeneration: UInt64?
     var pendingMetalDisplay: Bool = false
     /// The cursor position last submitted to the Metal renderer. Used to
     /// detect pure cursor-only moves (no rows dirty) such as the
@@ -611,7 +613,13 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     }
 
     /// Controls weather to use high ansi colors, if false terminal will use bold text instead of high ansi colors
-    public var useBrightColors: Bool = true
+    public var useBrightColors: Bool = true {
+        didSet {
+            if useBrightColors != oldValue {
+                colorsChanged()
+            }
+        }
+    }
 
     /// Selects which built-in theme (`lightTheme` or `darkTheme`) the view
     /// renders with, and whether to follow the system appearance. Default is
@@ -2324,17 +2332,19 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         #if canImport(MetalKit)
         if metalView != nil {
             let buffer = terminal.displayBuffer
+            let dirtyRange: ClosedRange<Int>?
             if buffer.lines.count == 0 {
-                metalDirtyRange = nil
+                dirtyRange = nil
             } else {
                 let startRow = buffer.yDisp
                 let endRow = min(buffer.lines.count - 1, buffer.yDisp + buffer.rows - 1)
                 if startRow <= endRow {
-                    metalDirtyRange = startRow...endRow
+                    dirtyRange = startRow...endRow
                 } else {
-                    metalDirtyRange = nil
+                    dirtyRange = nil
                 }
             }
+            setMetalDirtyRange(dirtyRange)
             queueMetalDisplay()
             return
         }
@@ -2699,7 +2709,9 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     
     public func resetFontSize ()
     {
-        fontSet = FontSet (font: FontSet.defaultFont)
+        fontSet = FontSet(font: FontSet.defaultFont)
+        resetFont(preservingTerminalModes: true)
+        selectNone()
     }
     
     func getImageScale () -> CGFloat {

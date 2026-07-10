@@ -60,6 +60,13 @@ struct ColorCell {
 struct ImageDraw {
     let texture: MTLTexture
     let vertices: [GlyphVertex]
+    let kittyPayloadHash: UInt64?
+
+    init(texture: MTLTexture, vertices: [GlyphVertex], kittyPayloadHash: UInt64? = nil) {
+        self.texture = texture
+        self.vertices = vertices
+        self.kittyPayloadHash = kittyPayloadHash
+    }
 }
 
 struct ImageDrawBuffer {
@@ -98,6 +105,7 @@ struct RowCacheEntry {
     var lineRef: BufferLine
     var generation: UInt64
     var lineInfoGeneration: UInt64
+    var lineInfoInvalidationGeneration: UInt64
     var data: RowDrawData?
     var buffers: RowDrawBuffers?
 }
@@ -126,7 +134,7 @@ struct KittyImageSignature: Hashable {
     let width: Int
     let height: Int
     let byteCount: Int
-    let headHash: UInt32
+    let payloadHash: UInt64
 }
 
 struct ClipRect {
@@ -161,6 +169,7 @@ struct KittyCacheStamp: Hashable {
     let placementsCount: Int
     let nextImageId: UInt32
     let nextPlacementId: UInt32
+    let mutationGeneration: UInt64
 }
 
 struct CacheSignature: Hashable {
@@ -207,6 +216,8 @@ struct MetalRendererDebugMetrics {
     let yDispChanges: Int
     let scrollRemapBuilds: Int
     let rowsRemapped: Int
+    let fullRefreshInvalidations: Int
+    let fullScrollDirtyRangesSuppressed: Int
     let buildsWithoutDirtyRows: Int
     let glyphCacheHits: Int
     let glyphCacheMisses: Int
@@ -215,10 +226,17 @@ struct MetalRendererDebugMetrics {
     let shaperCacheHits: Int
     let shaperCacheMisses: Int
     let postScriptNameCalls: Int
+    let retainedFontCount: Int
+    let rowCacheEntryCount: Int
+    let glyphCacheEntryCount: Int
+    let scaledFontCacheEntryCount: Int
+    let shaperCacheEntryCount: Int
+    let customGlyphCacheEntryCount: Int
 }
 
 struct MetalRendererDebugImageSnapshot: Equatable {
     let texture: ObjectIdentifier
+    let payloadHash: UInt64?
     let vertices: [Float]
 }
 
@@ -274,6 +292,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     private var rowCache: [Int: RowCacheEntry] = [:]
     private var cacheBufferingMode: MetalBufferingMode?
     private var cacheSignature: CacheSignature?
+    private var lastRenderedFullRefreshGeneration: UInt64?
+    private var lastConsumedDirtyFullRefreshGeneration: UInt64?
     private var atlasResetDuringBuild = false
     private var atlasResetHandled = false
     private var cursorBlinkTimer: Timer?
@@ -300,6 +320,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     private var debugYDispChanges = 0
     private var debugScrollRemapBuilds = 0
     private var debugRowsRemapped = 0
+    private var debugFullRefreshInvalidations = 0
+    private var debugFullScrollDirtyRangesSuppressed = 0
     private var debugBuildsWithoutDirtyRows = 0
     private var debugGlyphCacheHits = 0
     private var debugGlyphCacheMisses = 0
@@ -684,6 +706,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         atlasResetDuringBuild = false
         pruneKittyTextureCache()
         let buffer = terminalView.terminal.displayBuffer
+        let fullRefreshGeneration = terminalView.terminal.fullRefreshGeneration
+        let fullRefreshChanged = lastRenderedFullRefreshGeneration != fullRefreshGeneration
         let cellWidth = terminalView.cellDimension.width
         let cellHeight = terminalView.cellDimension.height
         let lineDescent = CTFontGetDescent(terminalView.fontSet.normal)
@@ -717,7 +741,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         let kittyStamp = KittyCacheStamp(imagesCount: kittyState.imagesById.count,
                                          placementsCount: kittyState.placementsByKey.count,
                                          nextImageId: kittyState.nextImageId,
-                                         nextPlacementId: kittyState.nextPlacementId)
+                                         nextPlacementId: kittyState.nextPlacementId,
+                                         mutationGeneration: kittyState.mutationGeneration)
         let signature = CacheSignature(scale: Double(scale),
                                        cellWidth: Double(cellWidth),
                                        cellHeight: Double(cellHeight),
@@ -784,17 +809,24 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             rowCache = rowCache.filter { visibleRange.contains($0.key) }
         }
 
-        let dirtyRange = terminalView.metalDirtyRange
-        terminalView.metalDirtyRange = nil
-        let needsFullRebuild = signatureChanged || rowCache.isEmpty
+        let dirtyState = terminalView.consumeMetalDirtyRange()
+        let dirtyRange = dirtyState.range
+        let dirtyIncludesFullRefresh = dirtyRange != nil &&
+            dirtyState.fullRefreshGeneration != lastConsumedDirtyFullRefreshGeneration
+        if dirtyRange != nil, let dirtyFullRefreshGeneration = dirtyState.fullRefreshGeneration {
+            lastConsumedDirtyFullRefreshGeneration = dirtyFullRefreshGeneration
+        }
+        let needsFullRebuild = signatureChanged || fullRefreshChanged || rowCache.isEmpty
         let dirtyVisibleRange = intersect(dirtyRange, visibleRange)
         let dirtyIsFullViewport = dirtyVisibleRange == visibleRange
         // Terminal scrolling marks the whole viewport dirty, but after remapping
         // unchanged BufferLine instances that range contains no extra information.
-        // Line identity/generation and line-info generation remain authoritative;
-        // non-full dirty ranges still cover selection/link-only redraws.
+        // Suppress only when the view's paired cause generation proves no explicit
+        // full refresh was coalesced into the range. Line identity/generation and
+        // line-info generation remain authoritative for ordinary line mutations.
         let canReuseFullScrollDirtyRange = remappedRows > 0 &&
             dirtyIsFullViewport &&
+            !dirtyIncludesFullRefresh &&
             !terminalView.selection.active
         let effectiveDirtyRange = canReuseFullScrollDirtyRange ? nil : dirtyVisibleRange
         let rebuildRange = needsFullRebuild ? visibleRange : effectiveDirtyRange
@@ -802,6 +834,12 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         debugVisibleRows += visibleRange.count
         if let dirtyVisibleRange {
             debugDirtyRowsRequested += dirtyVisibleRange.count
+        }
+        if fullRefreshChanged {
+            debugFullRefreshInvalidations += 1
+        }
+        if canReuseFullScrollDirtyRange {
+            debugFullScrollDirtyRangesSuppressed += 1
         }
         if !signatureChanged && dirtyRange == nil && !rowCache.isEmpty {
             debugBuildsWithoutDirtyRows += 1
@@ -837,10 +875,13 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             var entry = rowCache[row]
             // Cache is valid only when the absolute row still maps to the same
             // BufferLine instance (scrolls rotate refs in the CircularList) and
-            // that line has not been mutated since we cached its draw data.
+            // neither that line nor its view-specific line info has been invalidated
+            // since we cached its draw data. The per-line invalidation generation
+            // follows BufferLine identity when circular scrollback remaps rows.
             let cacheValid = entry?.lineRef === line &&
                 entry?.generation == lineGeneration &&
-                entry?.lineInfoGeneration == terminalView.lineInfoCacheGeneration
+                entry?.lineInfoGeneration == terminalView.lineInfoCacheGeneration &&
+                entry?.lineInfoInvalidationGeneration == terminalView.lineInfoInvalidationGeneration(for: line)
             let needsRebuild = needsFullRebuild ||
                 (rebuildRange?.contains(row) ?? false) ||
                 !cacheValid ||
@@ -863,6 +904,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                 entry = RowCacheEntry(lineRef: line,
                                       generation: lineGeneration,
                                       lineInfoGeneration: terminalView.lineInfoCacheGeneration,
+                                      lineInfoInvalidationGeneration: terminalView.lineInfoInvalidationGeneration(for: line),
                                       data: rowData,
                                       buffers: buffers)
                 rowCache[row] = entry
@@ -882,6 +924,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                     entry = RowCacheEntry(lineRef: line,
                                           generation: lineGeneration,
                                           lineInfoGeneration: terminalView.lineInfoCacheGeneration,
+                                          lineInfoInvalidationGeneration: terminalView.lineInfoInvalidationGeneration(for: line),
                                           data: rowData,
                                           buffers: cached.buffers)
                     rowCache[row] = entry
@@ -917,6 +960,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                 entry = RowCacheEntry(lineRef: line,
                                       generation: lineGeneration,
                                       lineInfoGeneration: terminalView.lineInfoCacheGeneration,
+                                      lineInfoInvalidationGeneration: terminalView.lineInfoInvalidationGeneration(for: line),
                                       data: rowData,
                                       buffers: buffers)
                 rowCache[row] = entry
@@ -968,6 +1012,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             return buildDrawData(scale: scale)
         }
         atlasResetHandled = false
+        lastRenderedFullRefreshGeneration = fullRefreshGeneration
         return result
     }
 
@@ -1043,7 +1088,9 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             for index in vertices.indices {
                 vertices[index].position.y += yOffset
             }
-            return ImageDraw(texture: draw.texture, vertices: vertices)
+            return ImageDraw(texture: draw.texture,
+                             vertices: vertices,
+                             kittyPayloadHash: draw.kittyPayloadHash)
         }
     }
 
@@ -1066,6 +1113,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         debugYDispChanges = 0
         debugScrollRemapBuilds = 0
         debugRowsRemapped = 0
+        debugFullRefreshInvalidations = 0
+        debugFullScrollDirtyRangesSuppressed = 0
         debugBuildsWithoutDirtyRows = 0
         debugGlyphCacheHits = 0
         debugGlyphCacheMisses = 0
@@ -1096,6 +1145,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             yDispChanges: debugYDispChanges,
             scrollRemapBuilds: debugScrollRemapBuilds,
             rowsRemapped: debugRowsRemapped,
+            fullRefreshInvalidations: debugFullRefreshInvalidations,
+            fullScrollDirtyRangesSuppressed: debugFullScrollDirtyRangesSuppressed,
             buildsWithoutDirtyRows: debugBuildsWithoutDirtyRows,
             glyphCacheHits: debugGlyphCacheHits,
             glyphCacheMisses: debugGlyphCacheMisses,
@@ -1103,7 +1154,13 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             scaledFontCacheMisses: debugScaledFontCacheMisses,
             shaperCacheHits: shaperCache.debugCacheHits,
             shaperCacheMisses: shaperCache.debugCacheMisses,
-            postScriptNameCalls: debugPostScriptNameCalls + shaperCache.debugPostScriptNameCalls
+            postScriptNameCalls: debugPostScriptNameCalls + shaperCache.debugPostScriptNameCalls,
+            retainedFontCount: retainedFonts.count,
+            rowCacheEntryCount: rowCache.count,
+            glyphCacheEntryCount: glyphCache.count,
+            scaledFontCacheEntryCount: scaledFontCache.count,
+            shaperCacheEntryCount: shaperCache.entryCount,
+            customGlyphCacheEntryCount: customGlyphCache.count
         )
     }
 
@@ -1175,6 +1232,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     private func debugSnapshot(_ draws: [ImageDraw]) -> [MetalRendererDebugImageSnapshot] {
         draws.map {
             MetalRendererDebugImageSnapshot(texture: ObjectIdentifier($0.texture as AnyObject),
+                                            payloadHash: $0.kittyPayloadHash,
                                             vertices: debugFlatten($0.vertices))
         }
     }
@@ -1754,9 +1812,10 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                 }) else {
                     continue
                 }
-                guard let texture = kittyTexture(imageId: placeholder.imageId) else {
+                guard let kittyTexture = kittyTexture(imageId: placeholder.imageId) else {
                     continue
                 }
+                let texture = kittyTexture.texture
 
                 let offsetScale = terminalView.getImageScale()
                 let offsetX = CGFloat(record.pixelOffsetX) / offsetScale
@@ -1792,7 +1851,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                         renderMode: renderMode,
                                         clipRect: clipRect,
                                         pivotY: pivotY,
-                                        scale: scale) {
+                                        scale: scale,
+                                        kittyPayloadHash: kittyTexture.payloadHash) {
                     placeholderImageDraws.append(draw)
                 }
             }
@@ -1836,6 +1896,23 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             }
         }
         return shapedSegments
+    }
+
+    func resetFontCaches() {
+        // Font identities are cache keys. Release the retained identity objects
+        // only after every cache that can contain one of those keys is empty.
+        rowCache.removeAll()
+        glyphCache.removeAll()
+        scaledFontCache.removeAll()
+        shaperCache.removeAll()
+        customGlyphCache.removeAll()
+        retainedFonts.removeAll()
+        cacheSignature = nil
+    }
+
+    func resetGlyphRasterizationCache() {
+        glyphCache.removeAll()
+        rowCache.removeAll()
     }
 
     private func glyphEntry(for font: CTFont, glyph: CGGlyph) -> GlyphEntry? {
@@ -1903,8 +1980,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
 #endif
         let identifier = ObjectIdentifier(font)
         if retainedFonts[identifier] == nil {
-            // Retain every keyed font for the renderer lifetime so an object
-            // address cannot be recycled into a false cache hit.
+            // Retain every keyed font until the next coordinated font-cache reset
+            // so an object address cannot be recycled into a false cache hit.
             retainedFonts[identifier] = font
         }
         return identifier
@@ -2228,6 +2305,15 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
 
         init(maxEntries: Int) {
             self.maxEntries = maxEntries
+        }
+
+        func removeAll() {
+            cache.removeAll()
+            order.removeAll()
+        }
+
+        var entryCount: Int {
+            cache.count
         }
 
         func shape(text: String, font: CTFont, fontIdentifier: ObjectIdentifier) -> ShaperRun? {
@@ -2794,14 +2880,14 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         return texture
     }
 
-    private func kittyTexture(imageId: UInt32) -> MTLTexture? {
+    private func kittyTexture(imageId: UInt32) -> (texture: MTLTexture, payloadHash: UInt64)? {
         guard let terminalView = terminalView,
               let kittyImage = terminalView.terminal.kittyGraphicsState.imagesById[imageId] else {
             return nil
         }
-        let signature = kittySignature(for: kittyImage.payload)
+        let signature = kittySignature(for: kittyImage)
         if let cached = kittyTextureCache[imageId], cached.signature == signature {
-            return cached.texture
+            return (cached.texture, signature.payloadHash)
         }
         let texture: MTLTexture?
         switch kittyImage.payload {
@@ -2820,31 +2906,24 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             }
 #endif
         }
-        return texture
+        return texture.map { ($0, signature.payloadHash) }
     }
 
-    private func kittySignature(for payload: KittyGraphicsPayload) -> KittyImageSignature {
-        switch payload {
+    private func kittySignature(for image: KittyGraphicsImage) -> KittyImageSignature {
+        switch image.payload {
         case .png(let data):
-            let headHash = hashBytes(data, limit: 64)
-            return KittyImageSignature(kind: 1, width: 0, height: 0, byteCount: data.count, headHash: headHash)
+            return KittyImageSignature(kind: 1,
+                                       width: 0,
+                                       height: 0,
+                                       byteCount: data.count,
+                                       payloadHash: image.payloadHash)
         case .rgba(let bytes, let width, let height):
-            let headHash = hashBytes(Data(bytes), limit: 64)
-            return KittyImageSignature(kind: 2, width: width, height: height, byteCount: bytes.count, headHash: headHash)
+            return KittyImageSignature(kind: 2,
+                                       width: width,
+                                       height: height,
+                                       byteCount: bytes.count,
+                                       payloadHash: image.payloadHash)
         }
-    }
-
-    private func hashBytes(_ data: Data, limit: Int) -> UInt32 {
-        let count = min(limit, data.count)
-        if count == 0 {
-            return 0
-        }
-        var hash: UInt32 = 2166136261
-        for byte in data.prefix(count) {
-            hash ^= UInt32(byte)
-            hash &*= 16777619
-        }
-        return hash
     }
 
     private func textureFromRGBA(bytes: [UInt8], width: Int, height: Int) -> MTLTexture? {
@@ -2891,7 +2970,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                            renderMode: BufferLine.RenderLineMode,
                            clipRect: ClipRect?,
                            pivotY: CGFloat,
-                           scale: CGFloat) -> ImageDraw? {
+                           scale: CGFloat,
+                           kittyPayloadHash: UInt64? = nil) -> ImageDraw? {
         let x0 = rect.minX * scale
         let y0 = rect.minY * scale
         let x1 = rect.maxX * scale
@@ -2907,7 +2987,9 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         let vertices = glyphQuadVertices(x0: clipped.x0, y0: clipped.y0, x1: clipped.x1, y1: clipped.y1,
                                          u0: clipped.u0, v0: clipped.v0, u1: clipped.u1, v1: clipped.v1,
                                          color: SIMD4<Float>(1, 1, 1, 1))
-        return ImageDraw(texture: texture, vertices: vertices)
+        return ImageDraw(texture: texture,
+                         vertices: vertices,
+                         kittyPayloadHash: kittyPayloadHash)
     }
 
     private func clipRect(_ x0: Float,

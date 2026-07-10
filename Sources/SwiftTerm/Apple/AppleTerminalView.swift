@@ -125,7 +125,15 @@ extension TerminalView {
     /// Defaults to `true` (standard macOS font smoothing).
     @objc open var fontSmoothing: Bool {
         get { _fontSmoothing }
-        set { _fontSmoothing = newValue }
+        set {
+            guard _fontSmoothing != newValue else { return }
+            _fontSmoothing = newValue
+#if canImport(MetalKit)
+            metalRenderer?.resetGlyphRasterizationCache()
+#endif
+            terminal.updateFullScreen()
+            queuePendingDisplay()
+        }
     }
 #endif
 
@@ -152,18 +160,55 @@ extension TerminalView {
     func resetLineInfoCache()
     {
         lineInfoCache.removeAll()
+        lineInfoInvalidationGenerations.removeAll()
         lineInfoCacheGeneration &+= 1
     }
+
+    func lineInfoInvalidationGeneration(for line: BufferLine) -> UInt64
+    {
+        lineInfoInvalidationGenerations[ObjectIdentifier(line)] ?? 0
+    }
+
+#if canImport(MetalKit)
+    func setMetalDirtyRange(_ range: ClosedRange<Int>?)
+    {
+        metalDirtyRange = range
+        metalDirtyRangeFullRefreshGeneration = range == nil ? nil : terminal.fullRefreshGeneration
+    }
+
+    func consumeMetalDirtyRange() -> (range: ClosedRange<Int>?, fullRefreshGeneration: UInt64?)
+    {
+        let result = (metalDirtyRange, metalDirtyRangeFullRefreshGeneration)
+        metalDirtyRange = nil
+        metalDirtyRangeFullRefreshGeneration = nil
+        return result
+    }
+#endif
 
     func invalidateLineInfoCache(row: Int)
     {
         lineInfoCache.removeValue(forKey: row)
+        let buffer = terminal.displayBuffer
+        guard row >= 0 && row < buffer.lines.count else { return }
+        let lineIdentifier = ObjectIdentifier(buffer.lines[row])
+        lineInfoInvalidationGenerations[lineIdentifier, default: 0] &+= 1
     }
 
     func pruneLineInfoCache(to visibleRows: ClosedRange<Int>)
     {
-        guard !lineInfoCache.isEmpty else { return }
-        lineInfoCache = lineInfoCache.filter { visibleRows.contains($0.key) }
+        if !lineInfoCache.isEmpty {
+            lineInfoCache = lineInfoCache.filter { visibleRows.contains($0.key) }
+        }
+        if !lineInfoInvalidationGenerations.isEmpty {
+            let buffer = terminal.displayBuffer
+            let visibleLineIdentifiers = Set<ObjectIdentifier>(visibleRows.compactMap { row in
+                guard row >= 0 && row < buffer.lines.count else { return nil }
+                return ObjectIdentifier(buffer.lines[row])
+            })
+            lineInfoInvalidationGenerations = lineInfoInvalidationGenerations.filter {
+                visibleLineIdentifiers.contains($0.key)
+            }
+        }
     }
 
     func cachedLineInfo(row: Int, line: BufferLine, cols: Int) -> ViewLineInfo
@@ -186,14 +231,22 @@ extension TerminalView {
     }
     
     // This is invoked when the font changes to recompute state
-    func resetFont()
+    func resetFont(preservingTerminalModes: Bool = false)
     {
+#if canImport(MetalKit)
+        metalRenderer?.resetFontCaches()
+#endif
         resetCaches()
         self.cellDimension = computeFontDimensions ()
         if (frame.width > 0) && (frame.height > 0) {
             let newCols = Int(frame.width / cellDimension.width)
             let newRows = Int(frame.height / cellDimension.height)
-            resize(cols: newCols, rows: newRows)
+            if preservingTerminalModes {
+                terminal.resize(cols: newCols, rows: newRows)
+                sizeChanged(source: terminal)
+            } else {
+                resize(cols: newCols, rows: newRows)
+            }
         }
         updateCaretView()
         
@@ -1842,8 +1895,9 @@ extension TerminalView {
 #if canImport(MetalKit)
         if metalView != nil {
             let buffer = terminal.displayBuffer
+            let dirtyRange: ClosedRange<Int>?
             if buffer.lines.count == 0 {
-                metalDirtyRange = nil
+                dirtyRange = nil
             } else {
                 let maxRow = buffer.lines.count - 1
                 let visibleStart = buffer.yDisp
@@ -1854,18 +1908,19 @@ extension TerminalView {
                     let clampedStart = max(0, min(absStart, maxRow))
                     let clampedEnd = max(0, min(absEnd, maxRow))
                     if clampedStart <= clampedEnd {
-                        metalDirtyRange = clampedStart...clampedEnd
+                        dirtyRange = clampedStart...clampedEnd
                     } else if visibleStart <= visibleEnd {
-                        metalDirtyRange = visibleStart...visibleEnd
+                        dirtyRange = visibleStart...visibleEnd
                     } else {
-                        metalDirtyRange = nil
+                        dirtyRange = nil
                     }
                 } else if visibleStart <= visibleEnd {
-                    metalDirtyRange = visibleStart...visibleEnd
+                    dirtyRange = visibleStart...visibleEnd
                 } else {
-                    metalDirtyRange = nil
+                    dirtyRange = nil
                 }
             }
+            setMetalDirtyRange(dirtyRange)
             noteMetalCursorActivityIfNeeded((x: buffer.x, y: buffer.yBase + buffer.y, hidden: terminal.cursorHidden))
             requestMetalDisplay()
         } else {
@@ -1879,7 +1934,7 @@ extension TerminalView {
         // life data being fed into it.
         #if canImport(MetalKit)
         if metalView != nil {
-            metalDirtyRange = metalVisibleRange()
+            setMetalDirtyRange(metalVisibleRange())
             let buffer = terminal.displayBuffer
             noteMetalCursorActivityIfNeeded((x: buffer.x, y: buffer.yBase + buffer.y, hidden: terminal.cursorHidden))
             requestMetalDisplay()

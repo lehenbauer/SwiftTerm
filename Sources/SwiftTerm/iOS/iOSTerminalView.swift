@@ -194,12 +194,14 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     var pendingDisplay: Bool = false
     var lineInfoCache: [Int: LineInfoCacheEntry] = [:]
     var lineInfoCacheGeneration: UInt64 = 0
+    var lineInfoInvalidationGenerations: [ObjectIdentifier: UInt64] = [:]
 #if canImport(MetalKit)
     var metalView: MTKView?
     var metalRenderer: MetalTerminalRenderer?
     var pendingMetalDisplay: Bool = false
     private var useMetalRenderer = false
     var metalDirtyRange: ClosedRange<Int>?
+    var metalDirtyRangeFullRefreshGeneration: UInt64?
     /// The cursor position last submitted to the Metal renderer. Used to
     /// detect pure cursor-only moves (no rows dirty) such as the
     /// CSI Ps C / CSI Ps D sequences shells emit in response to Option+Arrow
@@ -1286,7 +1288,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
     
     /// Controls weather to use high ansi colors, if false terminal will use bold text instead of high ansi colors
-    public var useBrightColors: Bool = true
+    public var useBrightColors: Bool = true {
+        didSet {
+            if useBrightColors != oldValue {
+                colorsChanged()
+            }
+        }
+    }
 
     /// Selects which built-in theme (`lightTheme` or `darkTheme`) the view
     /// renders with, and whether to follow the system appearance. Default is
@@ -2936,7 +2944,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
  
 #if canImport(MetalKit)
             if self.metalView != nil {
-                self.metalDirtyRange = self.metalVisibleRange()
+                self.setMetalDirtyRange(self.metalVisibleRange())
                 self.queueMetalDisplay()
             } else {
                 self.setNeedsDisplay(self.bounds)

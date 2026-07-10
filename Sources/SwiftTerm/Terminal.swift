@@ -435,6 +435,14 @@ open class Terminal {
     var refreshEnd = -1
     var scrollInvariantRefreshStart = Int.max
     var scrollInvariantRefreshEnd = -1
+    /// Advances whenever a non-scroll caller explicitly requests a full redraw.
+    private let fullRefreshGenerationLock = NSLock()
+    private var _fullRefreshGeneration: UInt64 = 0
+    var fullRefreshGeneration: UInt64 {
+        fullRefreshGenerationLock.lock()
+        defer { fullRefreshGenerationLock.unlock() }
+        return _fullRefreshGeneration
+    }
     var userScrolling = false
     var lineFeedMode = false
     
@@ -5064,6 +5072,9 @@ open class Terminal {
     
     public func updateFullScreen ()
     {
+        fullRefreshGenerationLock.lock()
+        _fullRefreshGeneration &+= 1
+        fullRefreshGenerationLock.unlock()
         refreshStart = 0
         refreshEnd = rows
         

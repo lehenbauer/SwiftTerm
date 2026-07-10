@@ -18,6 +18,7 @@ final class MetalRendererPerformanceTests {
         let frames: Int
         let initialYDisp: Int
         let finalYDisp: Int
+        let initialRetainedFontCount: Int
         let buildMilliseconds: Double
         let metrics: MetalRendererDebugMetrics
     }
@@ -37,6 +38,10 @@ final class MetalRendererPerformanceTests {
         #expect(legacy.metrics.rowsRebuilt >= optimized.metrics.rowsRebuilt * 5)
         #expect(legacy.metrics.postScriptNameCalls > 0)
         #expect(optimized.metrics.postScriptNameCalls == 0)
+        #expect(legacy.metrics.retainedFontCount == legacy.initialRetainedFontCount)
+        #expect(optimized.metrics.retainedFontCount == optimized.initialRetainedFontCount)
+        #expect(optimized.metrics.fullRefreshInvalidations == 0)
+        #expect(optimized.metrics.fullScrollDirtyRangesSuppressed == optimized.frames)
     }
 
     private func runScrollingBenchmark(legacyMode: Bool) throws -> BenchmarkResult {
@@ -44,6 +49,7 @@ final class MetalRendererPerformanceTests {
         prefill(harness, lineCount: 20_000)
         harness.renderer.debugSetLegacyBenchmarkMode(legacyMode)
         _ = harness.renderer.debugBuildSnapshot(scale: 1)
+        let initialRetainedFontCount = harness.renderer.debugMetricsSnapshot().retainedFontCount
         harness.renderer.debugResetMetrics()
 
         let frames = 120
@@ -64,6 +70,7 @@ final class MetalRendererPerformanceTests {
                                frames: frames,
                                initialYDisp: initialYDisp,
                                finalYDisp: finalYDisp,
+                               initialRetainedFontCount: initialRetainedFontCount,
                                buildMilliseconds: buildMilliseconds,
                                metrics: metrics)
     }
@@ -85,11 +92,14 @@ final class MetalRendererPerformanceTests {
             "yDispOnlyInvalidations=\(metrics.yDispOnlySignatureInvalidations) " +
             "yDispChanges=\(metrics.yDispChanges) scrollRemapBuilds=\(metrics.scrollRemapBuilds) " +
             "rowsRemapped=\(metrics.rowsRemapped) " +
+            "fullRefreshInvalidations=\(metrics.fullRefreshInvalidations) " +
+            "fullScrollDirtyRangesSuppressed=\(metrics.fullScrollDirtyRangesSuppressed) " +
             "noDirtyBuilds=\(metrics.buildsWithoutDirtyRows) " +
             "glyphHits=\(metrics.glyphCacheHits) glyphMisses=\(metrics.glyphCacheMisses) " +
             "scaledFontHits=\(metrics.scaledFontCacheHits) scaledFontMisses=\(metrics.scaledFontCacheMisses) " +
             "shaperHits=\(metrics.shaperCacheHits) shaperMisses=\(metrics.shaperCacheMisses) " +
-            "postScriptNameCalls=\(metrics.postScriptNameCalls)"
+            "postScriptNameCalls=\(metrics.postScriptNameCalls) " +
+            "retainedFonts=\(result.initialRetainedFontCount)->\(metrics.retainedFontCount)"
         )
     }
 
@@ -152,7 +162,7 @@ final class MetalRendererPerformanceTests {
     }
 
     private var benchmarkLine: String {
-        "0123456789 abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ\r\n"
+        "0123456789 abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ 界🙂\r\n"
     }
 
     private func makeHarness(scrollback: Int) throws -> Harness {
@@ -162,6 +172,7 @@ final class MetalRendererPerformanceTests {
         view.frame.size = CGSize(width: view.cellDimension.width * 80,
                                  height: view.cellDimension.height * 60)
         let renderer = MetalTerminalRenderer(debugTerminalView: view)
+        view.metalRenderer = renderer
         return Harness(view: view, renderer: renderer)
     }
 
@@ -173,14 +184,14 @@ final class MetalRendererPerformanceTests {
     private func markTerminalDirty(_ view: TerminalView) {
         let terminal = view.terminal!
         guard let (rowStart, rowEnd) = terminal.getUpdateRange() else {
-            view.metalDirtyRange = nil
+            view.setMetalDirtyRange(nil)
             return
         }
         let buffer = terminal.displayBuffer
         let maxRow = buffer.lines.count - 1
         let start = max(0, min(buffer.yDisp + rowStart, maxRow))
         let end = max(0, min(buffer.yDisp + rowEnd, maxRow))
-        view.metalDirtyRange = start <= end ? start...end : nil
+        view.setMetalDirtyRange(start <= end ? start...end : nil)
         terminal.clearUpdateRange()
     }
 }
