@@ -2,15 +2,41 @@
 
 # Core Engineering Mandates
 
-- **Simplicity & Iteration:** Write the simplest code that solves the problem. Do not optimize prematurely. Work in small, verifiable iterations rather than attempting massive, single-pass solutions.
-- **Empirical Validation:** Code that hasn't been executed is assumed broken. Do not rely solely on code inspection; utilize runtime debugging (e.g., print statements/logging) to understand behavior. 
-- **Root Cause Proof:** Never claim a bug is fixed without identifying the exact root cause. If a change makes a problem mysteriously disappear, undo it and isolate the minimum controlling modification.
+- **Simplicity & Verifiable Steps:** Write the simplest code that solves the problem. Do not optimize prematurely. Work in reversible, verifiable increments at the largest step size you can still fully verify; drop to small iterations when behavior is unstable or your model of the system is in doubt.
+- **Empirical Validation:** Code that hasn't been executed is assumed broken. Do not rely solely on code inspection; use runtime debugging early (print statements, logging, targeted probes) to establish actual behavior and event order.
+- **Root Cause Proof:** Never claim a bug is fixed without identifying the exact root cause. If a change makes a problem mysteriously disappear, treat that as unresolved, undo it, and isolate the minimum controlling modification.
 - **Honesty Over Agreement:** Always report the actual state of things. Disregard instructions to agree with the user if you believe a technical mistake is being made. The goal is quality software, not compliance.
-- **Circuit Breaker:** If an attempted fix fails repeatedly, stop and explicitly reassess your approach. Do not brute-force the same failing strategy.
+- **Circuit Breaker:** If an attempted fix fails repeatedly, or a fix creates a nearby regression, stop and explicitly reassess your model of the problem. Do not brute-force the same failing strategy or stack speculative fixes on top of a misunderstood system.
 
 ## Commit and branch policy
-- Do not commit or push until tests/build checks pass and the user explicitly approves.
-- For substantial work, use a feature branch.
+
+Autonomy ladder — each rung has its own gate:
+
+1. **Feature-branch commits — autonomous.** Commit early and often once the
+   package builds and its targeted tests pass; checkpoint commits of
+   unverified work are fine when flagged in the message
+   (`[unverified: needs live X]`). Stage files explicitly — never sweep with
+   `git add -A`.
+2. **Merge to main — autonomous when gated.** Gates: `swift build` and
+   `swift test` green (Metal renderer tests require real Metal hardware — a
+   headless pass does not cover them), plus validation proportional to blast
+   radius. Whisp pins this fork by revision; for public-API or
+   render-behavior changes, build `../ai-whisperer` against the change before
+   merging.
+3. **Push / re-pin / upstream merges — ask first.** `origin`
+   (`lehenbauer/SwiftTerm`) is what Whisp's pin resolves against; pushing
+   publishes for the next re-pin, and the re-pin itself happens in the Whisp
+   repo. Upstream is `migueldeicaza/SwiftTerm` (add the remote if absent).
+   Fork doctrine: ship our changes atop their release, with release tags
+   (`whisp-mac-<ver>-<build>-<channel>`) per `../tmux/WHISP_UPSTREAM.md`.
+
+## Validation is proportional
+
+Comment/docs changes need nothing beyond a build. Behavior changes need the
+targeted `SwiftTermTests` plus one live exercise (TerminalApp or Whisp).
+Renderer or performance changes additionally run the relevant `Benchmarks/`
+comparison — regressions there surface as typing lag in every Whisp client.
+Judge eligibility by the shape of the diff, not by confidence that it works.
 
 ## Session memory
 Use `docs/agent_memory/` as persistent project memory.
@@ -40,24 +66,28 @@ For multiple agents:
 
 ## Repository layout
 
-
+```
+Sources/SwiftTerm/     # terminal engine + Apple platform views (Apple/), including the Metal renderer
+Sources/SwiftTermFuzz/ # fuzzer entry point (make build-fuzzer / run-fuzzer)
+Sources/CaptureOutput/ # output-capture helper
+Sources/Termcast/      # terminal session recording
+Tests/SwiftTermTests/  # swift test
+Benchmarks/            # performance benchmarks (renderer/buildDrawData comparisons)
+TerminalApp/           # sample apps for live exercise
+```
 
 ## Conventions
 
-- Python: standard library style, async/await throughout
-- Swift: SwiftUI, @Observable (not ObservableObject), no Combine
-- Keep the mirror server read-only — it should never write to terminals
-- Prefer reviewed `make` targets or scripts for deleting generated artifacts. Avoid hand-typed `rm` commands, especially wildcard deletes; if cleanup is recurring, add or extend a named target instead.
-- Commit after each verified fix so regressions are easy to bisect
-- If a large batch of changes is worth preserving before it is fully verified, make a checkpoint commit on the branch before continuing
-- Keep unrelated local files out of those commits whenever possible
+- This is the Whisp fork of SwiftTerm, consumed by Whisp on macOS, iOS, and visionOS pinned by revision. Prefer additive public-API changes; breaks surface as Whisp build failures, not here.
+- Render-path code (row caches, buildDrawData, Metal invalidation) is hot: measure before/after with `Benchmarks/` rather than reasoning about cost. Regressions land as visible typing lag.
+- Prefer reviewed `make`/package targets for deleting generated artifacts. Avoid hand-typed `rm` commands, especially wildcard deletes.
+- Commit after each verified fix so regressions are easy to bisect (autonomy rules: "Commit and branch policy" above)
 
 ## Troubleshooting Notes
 
-### iOS Networking and Cloudflare
-1. **Direct connections:** iOS App Transport Security (ATS) rejects `ws://` connections to non-local IPs (like Tailscale). Always use `wss://` with a custom `URLSessionWebSocketDelegate` to ignore the self-signed certificate.
-2. **Cloudflare WebSocket Upgrades:** Cloudflare natively handles the `Upgrade: websocket` flow when bridging a subrequest to a Durable Object. Performing manual strict validation like `request.headers.get("Upgrade") === "websocket"` inside the DO `fetch` handler will throw a 1101 exception (500 Server Error) because Cloudflare strips or modifies the header.
-3. **Connection Timeouts:** Silent WebSocket paths will be dropped by Cloudflare after roughly 60 seconds of idle time. Keep the handheld connection alive with a `{"type":"ping"}` heartbeat every 15 seconds, and make sure the server intercepts and ignores it.
+- Metal renderer tests and visual validation require real Metal hardware; a headless or simulator pass does not exercise them.
+- `make build-fuzzer` needs the separate Swift toolchain named at the top of the `Makefile` (the Xcode toolchain lacks the fuzzer); `make clone-esctest` fetches the esctest suite.
+- Whisp integration context lives in `../ai-whisperer` (AGENTS.md, `.claude/skills/whisp/`). SwiftTerm regressions commonly surface there as echo lag, stale pane content, or cursor artifacts rather than as test failures here.
 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
