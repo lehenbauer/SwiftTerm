@@ -39,30 +39,30 @@ comparison — regressions there surface as typing lag in every Whisp client.
 Judge eligibility by the shape of the diff, not by confidence that it works.
 
 ## Session memory
-Use `docs/agent_memory/` as persistent project memory.
-At the start of substantive work, read:
-- `docs/agent_memory/current_state.md`
-- `docs/agent_memory/decisions.md`
-- Newest file under `docs/agent_memory/handoffs/`
+Use `docs/agent_memory/` as persistent project memory. Never store secrets in
+memory files; treat them as durable handoff state, not a scratchpad, chat log,
+or home for speculative reasoning.
 
-Add concise, date-stamped notes for meaningful decisions or milestones.
-Never store secrets in memory files.
-Treat memory files as durable human-readable handoff state, not a scratchpad or chat log.
+At the start of substantive work, read `docs/agent_memory/current_state.md`
+only. `decisions.md` and `handoffs/` are references, not briefings: grep
+`decisions.md` for the topics you are about to touch, and open a handoff only
+when something points you at it.
 
-Use them like this:
-- `current_state.md`: verified facts, current status, known limitations, and what is true now
-- `decisions.md`: durable decisions, defaults, and tradeoffs that future agents should not silently re-decide
-- `handoffs/`: task- or session-specific notes that would otherwise clutter the top-level memory files
+- `current_state.md`: bounded snapshot of what is true now — verified facts,
+  status, known limitations. Update lines in place; keep it under ~100 lines,
+  one line per entry with a handoff link for narrative.
+- `decisions.md`: decisions future agents must not silently re-decide. One
+  dated bullet, at most ~2 sentences, imperative — record the constraint and
+  the trap, not the design, and only when a future agent might plausibly undo
+  it. Supersede by editing the old entry in place; never append tombstones.
+- `handoffs/`: dated, append-only long-form records — the sole home for
+  history (upstream merges, investigations, validation records). One
+  synthesized handoff per task; raw delegate reports are ephemeral once
+  synthesized.
 
-Do not use memory files for:
-- moment-to-moment self-talk, speculative reasoning, or chain-of-thought style notes
-- long debugging transcripts or repeated failed experiments unless they identify a future trap
-- tentative assumptions written as if they were facts
-
-For multiple agents:
-- prefer short, high-signal entries another engineer or agent could rely on
-- prefer detailed coordination notes in a dated handoff file instead of repeatedly editing the same top-level files
-- if machine-readable task coordination is needed later, add a separate structured state file rather than overloading these markdown summaries
+Memory edits ride the closing commit of the work they describe. If
+machine-readable coordination is needed later, add a structured state file
+rather than overloading these markdown summaries.
 
 ## Repository layout
 
