@@ -117,6 +117,38 @@ struct LineInfoCacheEntry {
 }
 
 extension TerminalView {
+
+    /// Pixel-derived geometry may mutate the logical grid only when the
+    /// consumer has opted into the historical auto-resize behavior.
+    private var boundsMayMutateGrid: Bool {
+        autoResizeGrid
+    }
+
+    private func resizeTerminalPreservingModes(cols: Int, rows: Int) {
+        let scrollTop = terminal.buffer.scrollTop
+        let scrollBottom = terminal.buffer.scrollBottom
+        let marginLeft = terminal.buffer.marginLeft
+        let marginRight = terminal.buffer.marginRight
+
+        terminal.resize(cols: cols, rows: rows)
+
+        let lastRow = max(0, terminal.rows - 1)
+        let restoredScrollTop = min(scrollTop, lastRow)
+        terminal.buffer.scrollTop = restoredScrollTop
+        terminal.buffer.scrollBottom = max(
+            restoredScrollTop,
+            min(scrollBottom, lastRow)
+        )
+
+        let lastColumn = max(0, terminal.cols - 1)
+        let restoredMarginLeft = min(marginLeft, lastColumn)
+        terminal.buffer.marginLeft = restoredMarginLeft
+        terminal.buffer.marginRight = max(
+            restoredMarginLeft,
+            min(marginRight, lastColumn)
+        )
+        sizeChanged(source: terminal)
+    }
     typealias CellDimension = CGSize
 
 #if os(macOS)
@@ -241,11 +273,12 @@ extension TerminalView {
         if (frame.width > 0) && (frame.height > 0) {
             let newCols = Int(frame.width / cellDimension.width)
             let newRows = Int(frame.height / cellDimension.height)
-            if preservingTerminalModes {
-                terminal.resize(cols: newCols, rows: newRows)
-                sizeChanged(source: terminal)
-            } else {
-                resize(cols: newCols, rows: newRows)
+            if boundsMayMutateGrid {
+                if preservingTerminalModes {
+                    resizeTerminalPreservingModes(cols: newCols, rows: newRows)
+                } else {
+                    resize(cols: newCols, rows: newRows)
+                }
             }
         }
         updateCaretView()
@@ -324,6 +357,7 @@ extension TerminalView {
         if newSize.width == 0 && newSize.height == 0 {
             return false
         }
+        guard boundsMayMutateGrid else { return false }
         let newRows = Int (newSize.height / cellDimension.height)
         let newCols = Int (getEffectiveWidth (size: newSize) / cellDimension.width)
         
@@ -2274,6 +2308,18 @@ extension TerminalView {
         terminal.resize (cols: cols, rows: rows)
         sizeChanged (source: terminal)
         terminal.softReset()
+    }
+
+    /// Resizes the logical grid while optionally preserving terminal modes.
+    /// The existing `resize(cols:rows:)` API intentionally keeps its soft-reset
+    /// behavior for compatibility with existing consumers.
+    public func resize(cols: Int, rows: Int, preservingTerminalModes: Bool)
+    {
+        if preservingTerminalModes {
+            resizeTerminalPreservingModes(cols: cols, rows: rows)
+        } else {
+            resize(cols: cols, rows: rows)
+        }
     }
 
     /**

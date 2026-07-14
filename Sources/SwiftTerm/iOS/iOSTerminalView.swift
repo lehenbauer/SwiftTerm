@@ -221,6 +221,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     var caretView: CaretView?
     var _lineSpacing: CGFloat = 1.0
     var terminal: Terminal!
+
+    /// Whether pixel geometry is allowed to change the terminal's logical grid.
+    /// Defaults to true to preserve the historical behavior for all consumers.
+    public var autoResizeGrid: Bool = true
     private var progressBarView: TerminalProgressBarView?
     private var progressReportTimer: Timer?
     private var lastProgressValue: UInt8?

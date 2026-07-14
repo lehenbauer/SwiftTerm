@@ -180,6 +180,10 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     var _lineSpacing: CGFloat = 1.0
     public var terminal: Terminal!
 
+    /// Whether pixel geometry is allowed to change the terminal's logical grid.
+    /// Defaults to true to preserve the historical behavior for all consumers.
+    public var autoResizeGrid: Bool = true
+
     /// Marked (uncommitted) text from an input source (IME, dictation, etc.).
     private var markedTextStorage: NSAttributedString?
     private var markedSelectedRange: NSRange = NSRange(location: NSNotFound, length: 0)
