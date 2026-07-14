@@ -1,5 +1,20 @@
 # Current State
 
+## 2026-07-14
+
+- Merged `fix/mirror-grid-pin` (`a503a72`, pushed to origin during the Whisp
+  mirror-grid-pin campaign) into local `main` as `19b194a`. Whisp pins this
+  fork at `a503a72` by revision; the merge is lineage reconciliation only and
+  does not move the pin.
+- The branch adds `autoResizeGrid` (default true) gating both bounds-derived
+  grid mutators (`processSizeChange`, `resetFont`) and
+  `resize(cols:rows:preservingTerminalModes:)`; campaign record lives in
+  `../ai-whisperer/docs/agent_memory/handoffs/2026-07-14-mirror-grid-pin-campaign.md`.
+- Validation passed on the merged result: `swift build`;
+  `swift test --no-parallel` (496 tests / 47 suites + 43 XCTest cases, 0
+  failures, Metal hardware; `MirrorGridPinTests` suite green).
+- No push was performed (`main` is ahead of `origin/main` by the merge).
+
 ## 2026-07-01
 
 - Merged fork `origin/main` at `faa1f44` into local `main` after the prior upstream sync commit `269c7bb`.
