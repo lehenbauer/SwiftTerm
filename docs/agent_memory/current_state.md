@@ -13,7 +13,8 @@
 - Validation passed on the merged result: `swift build`;
   `swift test --no-parallel` (496 tests / 47 suites + 43 XCTest cases, 0
   failures, Metal hardware; `MirrorGridPinTests` suite green).
-- No push was performed (`main` is ahead of `origin/main` by the merge).
+- Pushed to `origin/main` later the same day with Karl's approval
+  (`f4f73d8..34c1728`); fork and origin are in sync.
 
 ## 2026-07-01
 
