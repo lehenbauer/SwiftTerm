@@ -8,6 +8,12 @@
 
 import Foundation
 
+#if os(macOS)
+import AppKit
+#elseif canImport(UIKit)
+import UIKit
+#endif
+
 // MARK: - FNV-1a 64
 
 /// FNV-1a 64-bit non-cryptographic hash used as a triage content token.
@@ -335,3 +341,122 @@ extension Terminal {
         return names
     }
 }
+
+// MARK: - View geometry + input policy (PR2)
+
+#if canImport(AppKit) || canImport(UIKit)
+
+/// View-side grid fit geometry (points). Core-engine grid is still in ``TerminalInspectionSnapshot``.
+public struct TerminalViewGeometrySnapshot: Sendable, Equatable {
+    public var cellWidthPoints: Double
+    public var cellHeightPoints: Double
+    public var boundsWidthPoints: Double
+    public var boundsHeightPoints: Double
+    /// Result of `getEffectiveWidth` — width used for cols = floor(effective / cellWidth).
+    public var effectiveGridWidthPoints: Double
+    /// `boundsWidth - effectiveGridWidth` (scroller reservation on macOS legacy scrollers; 0 on iOS).
+    public var scrollerReservedWidthPoints: Double
+    public var scaleFactor: Double
+    public var autoResizeGrid: Bool
+    public var engineCols: Int
+    public var engineRows: Int
+}
+
+/// View-level input policy that is not pure engine state.
+public struct TerminalViewInputPolicySnapshot: Sendable, Equatable {
+    public var allowMouseReporting: Bool
+}
+
+/// Combined engine + view inspection for a live `TerminalView`.
+public struct TerminalViewInspectionSnapshot: Sendable, Equatable {
+    public var terminal: TerminalInspectionSnapshot
+    public var geometry: TerminalViewGeometrySnapshot
+    public var inputPolicy: TerminalViewInputPolicySnapshot
+}
+
+extension TerminalViewGeometrySnapshot: Codable {
+    enum CodingKeys: String, CodingKey {
+        case cellWidthPoints = "cell_width_points"
+        case cellHeightPoints = "cell_height_points"
+        case boundsWidthPoints = "bounds_width_points"
+        case boundsHeightPoints = "bounds_height_points"
+        case effectiveGridWidthPoints = "effective_grid_width_points"
+        case scrollerReservedWidthPoints = "scroller_reserved_width_points"
+        case scaleFactor = "scale_factor"
+        case autoResizeGrid = "auto_resize_grid"
+        case engineCols = "engine_cols"
+        case engineRows = "engine_rows"
+    }
+}
+
+extension TerminalViewInputPolicySnapshot: Codable {
+    enum CodingKeys: String, CodingKey {
+        case allowMouseReporting = "allow_mouse_reporting"
+    }
+}
+
+extension TerminalViewInspectionSnapshot: Codable {
+    enum CodingKeys: String, CodingKey {
+        case terminal
+        case geometry
+        case inputPolicy = "input_policy"
+    }
+}
+
+extension TerminalView {
+    /// Capture grid-fit geometry. Call on the main actor / view mutation queue.
+    public func inspectGeometry() -> TerminalViewGeometrySnapshot {
+        let cell = cellDimension ?? .zero
+        let boundsSize = bounds.size
+        let effective = getEffectiveWidth(size: boundsSize)
+        let reserved = max(0, boundsSize.width - effective)
+        let scale = inspectionScaleFactor()
+        let engine = terminal
+        return TerminalViewGeometrySnapshot(
+            cellWidthPoints: Double(cell.width),
+            cellHeightPoints: Double(cell.height),
+            boundsWidthPoints: Double(boundsSize.width),
+            boundsHeightPoints: Double(boundsSize.height),
+            effectiveGridWidthPoints: Double(effective),
+            scrollerReservedWidthPoints: Double(reserved),
+            scaleFactor: Double(scale),
+            autoResizeGrid: autoResizeGrid,
+            engineCols: engine?.cols ?? 0,
+            engineRows: engine?.rows ?? 0
+        )
+    }
+
+    /// Capture view input policy (mouse forwarding gate).
+    public func inspectInputPolicy() -> TerminalViewInputPolicySnapshot {
+        TerminalViewInputPolicySnapshot(allowMouseReporting: allowMouseReporting)
+    }
+
+    /// Engine + geometry + input policy in one capture on the view's mutation context.
+    public func inspectAll(trimRight: Bool = true) -> TerminalViewInspectionSnapshot {
+        let term = terminal!
+        return TerminalViewInspectionSnapshot(
+            terminal: term.inspect(trimRight: trimRight),
+            geometry: inspectGeometry(),
+            inputPolicy: inspectInputPolicy()
+        )
+    }
+
+    private func inspectionScaleFactor() -> CGFloat {
+        #if os(macOS)
+        if let windowScale = window?.backingScaleFactor, windowScale > 0 {
+            return windowScale
+        }
+        if let screenScale = NSScreen.main?.backingScaleFactor, screenScale > 0 {
+            return screenScale
+        }
+        return 1
+        #else
+        if let windowScale = window?.contentScaleFactor, windowScale > 0 {
+            return windowScale
+        }
+        return traitCollection.displayScale > 0 ? traitCollection.displayScale : 1
+        #endif
+    }
+}
+
+#endif
