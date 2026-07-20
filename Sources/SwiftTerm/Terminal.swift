@@ -357,19 +357,19 @@ open class Terminal {
     }
     
     // Whether the terminal is operating in application keypad mode
-    var applicationKeypad : Bool = false
+    public var applicationKeypad: Bool = false
     
     // Whether the terminal is operating in application cursor mode
     public var applicationCursor : Bool = false
 
-    private struct KeyboardModeState {
+    struct KeyboardModeState {
         var flags: KittyKeyboardFlags = []
         var stack: [KittyKeyboardFlags] = []
     }
 
     private static let keyboardModeStackLimit = 16
-    private var keyboardModeNormal = KeyboardModeState()
-    private var keyboardModeAlt = KeyboardModeState()
+    var keyboardModeNormal = KeyboardModeState()
+    var keyboardModeAlt = KeyboardModeState()
 
     public var keyboardEnhancementFlags: KittyKeyboardFlags {
         let mode = isCurrentBufferAlternate ? keyboardModeAlt : keyboardModeNormal
@@ -379,17 +379,17 @@ open class Terminal {
     // You can ignore most of the defaults set here, the function
     // reset() will do that again
     var sendFocus: Bool = false
-    var cursorHidden : Bool = false
+    public var cursorHidden: Bool = false
     
     /// Controls the origin mode (DECOM), when set, the screen is limited to the top and bottom margins
-    var originMode: Bool = false
+    public var originMode: Bool = false
     
     /// Controls whether it is possible to set left and right margin modes
-    var marginMode: Bool = false
+    public var marginMode: Bool = false
     
-    var insertMode: Bool = false
+    public var insertMode: Bool = false
     
-    var wraparound: Bool = false
+    public var wraparound: Bool = false
 
     func setMarginMode(_ value: Bool) {
         marginMode = value
@@ -490,7 +490,8 @@ open class Terminal {
     // The mouse coordinates can be encoded in a number of ways, and obey to historical
     // upgrades to the protocol, but also attempts at fixing limitations of the different
     // encodings.
-    enum MouseProtocolEncoding {
+    /// Coordinate encoding used for mouse reports (independent of ``MouseMode``).
+    public enum MouseProtocolEncoding {
         // The default x10 mode is limited to coordinates up to 223.
         // (255-32).   The other modes solve this limitaion
         case x10
@@ -511,7 +512,7 @@ open class Terminal {
     }
     
     // The protocol encoding for the terminal
-    private var mouseProtocol: MouseProtocolEncoding = .x10
+    public private(set) var mouseProtocol: MouseProtocolEncoding = .x10
 
     // This is used to track if we are setting the colors, to prevent a
     // recursive invocation (nativeForegroundColor sets the terminal
@@ -749,11 +750,12 @@ open class Terminal {
         return nil
     }
 
-    /// Returns the contents of a line as a BufferLine, or nil if the requested line is out of range
+    /// Returns the contents of a viewport line as a BufferLine, or nil if out of range.
     ///
-    /// The line is counted  from start of scroll back, not what the terminal has visible right now.
-    /// - Parameter row: the row to retrieve, relative to the scroll buffer, not the visible display
-    /// - Returns: nil if the col or row are out of bounds, or the BufferLine  otherwise
+    /// `row` is **viewport-relative** (0 = top visible row). The underlying storage index is
+    /// `row + buffer.yDisp`. For scrollback-absolute addressing use ``getScrollInvariantLine(row:)``.
+    /// - Parameter row: viewport row in `0..<rows`
+    /// - Returns: nil if the row is out of bounds, or the BufferLine otherwise
     public func getLine (row: Int) -> BufferLine? {
         if row < 0 || row >= rows {
             return nil
