@@ -202,18 +202,23 @@ native background-to-foreground direction instead.
 For a view that must process its first byte at a specific size, pass these
 options through the initial-geometry initializer. `.grid(cols:rows:)` overrides
 only the options' columns and rows, preserving settings such as scrollback and
-terminal name. `.viewport(_:)` takes anticipated view bounds in points and lets
-SwiftTerm apply its own macOS scroller reservation:
+terminal name. `.viewport(points:)` takes anticipated view bounds in view
+points — never device pixels; divide native pixels by the display scale
+first — and lets SwiftTerm apply its own macOS scroller reservation:
 
 ```swift
 let terminalView = TerminalView(
     frame: .zero,
     font: preferredFont,
     terminalOptions: options,
-    initialGeometry: .viewport(expectedBounds.size),
+    initialGeometry: .viewport(points: expectedBounds.size),
     autoResizeGrid: true
 )
 ```
+
+Immediately after construction — before any layout pass — `getTerminal()`
+reports the resolved grid, so a PTY or SSH channel can be opened at the
+correct size without waiting for layout.
 
 Subclasses with their own designated initializers need a matching passthrough
 initializer. If a local process must avoid any startup size correction, wait for

@@ -50,7 +50,7 @@ final class InitialGeometryViewTests {
 
     @Test func viewportUsesLiveResizeGeometryMath() {
         let size = CGSize(width: 720, height: 420)
-        let view = makeView(initialGeometry: .viewport(size), autoResizeGrid: true)
+        let view = makeView(initialGeometry: .viewport(points: size), autoResizeGrid: true)
         let expectedCols = Int(view.getEffectiveWidth(size: size) / view.cellDimension.width)
         let expectedRows = Int(size.height / view.cellDimension.height)
 
@@ -67,7 +67,7 @@ final class InitialGeometryViewTests {
         ]
 
         for size in invalidSizes {
-            let view = makeView(options: options, initialGeometry: .viewport(size), autoResizeGrid: false)
+            let view = makeView(options: options, initialGeometry: .viewport(points: size), autoResizeGrid: false)
             #expect(view.terminal.cols == 90)
             #expect(view.terminal.rows == 30)
         }

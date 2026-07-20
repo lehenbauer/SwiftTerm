@@ -42,10 +42,12 @@ public enum TerminalInitialGeometry {
     /// An authoritative logical grid (e.g. a known tmux pane size).
     /// Wins over any nonzero frame.
     case grid(cols: Int, rows: Int)
-    /// The view's anticipated bounds in points. SwiftTerm applies its own
-    /// chrome math (macOS scroller reservation) exactly as it does for a live
-    /// frame. Pass the size the view will occupy, not a pre-shrunk content size.
-    case viewport(CGSize)
+    /// The view's anticipated bounds in view points, not device pixels; a
+    /// caller holding native pixels must divide by the display scale first.
+    /// SwiftTerm applies its own chrome math (macOS scroller reservation)
+    /// exactly as it does for a live frame. Pass the size the view will
+    /// occupy, not a pre-shrunk content size.
+    case viewport(points: CGSize)
 }
 
 /// Controls how links are discovered during pointer/hover tracking in terminal views.
@@ -326,7 +328,7 @@ extension TerminalView {
             case .grid(let cols, let rows):
                 opts.cols = cols
                 opts.rows = rows
-            case .viewport(let size) where size.width.isFinite && size.height.isFinite &&
+            case .viewport(points: let size) where size.width.isFinite && size.height.isFinite &&
                                                    size.width > 0 && size.height > 0:
                 opts.cols = Int(getEffectiveWidth(size: size) / cellDimension.width)
                 opts.rows = Int(size.height / cellDimension.height)

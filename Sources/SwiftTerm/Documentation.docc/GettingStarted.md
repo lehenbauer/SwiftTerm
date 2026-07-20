@@ -164,11 +164,15 @@ let terminalView = TerminalView(
 )
 ```
 
-Use `.grid(cols:rows:)` for an authoritative logical size. Use `.viewport(_:)`
-for anticipated view bounds in points; pass the full size the view will occupy,
-not a content size pre-shrunk for a macOS scroller. SwiftTerm applies the same
-chrome and font-cell math used by later layout. `autoResizeGrid` controls whether
-subsequent bounds and font changes may resize the logical grid.
+Use `.grid(cols:rows:)` for an authoritative logical size. Use
+`.viewport(points:)` for anticipated view bounds in view points (never device
+pixels — divide native pixels by the display scale first); pass the full size
+the view will occupy, not a content size pre-shrunk for a macOS scroller.
+SwiftTerm applies the same chrome and font-cell math used by later layout.
+`autoResizeGrid` controls whether subsequent bounds and font changes may
+resize the logical grid. In every mode, `getTerminal()` reports the resolved
+grid immediately after construction and before any layout pass, so an SSH or
+PTY channel can be opened at the correct size right away.
 
 If a `TerminalView` subclass declares its own designated initializers, add a
 passthrough initializer with the same arguments to expose this construction path.
