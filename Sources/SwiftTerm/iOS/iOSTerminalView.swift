@@ -225,6 +225,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     /// Whether pixel geometry is allowed to change the terminal's logical grid.
     /// Defaults to true to preserve the historical behavior for all consumers.
     public var autoResizeGrid: Bool = true
+    var startupOptions: TerminalOptions = .default
+    var initialGeometry: TerminalInitialGeometry?
     private var progressBarView: TerminalProgressBarView?
     private var progressReportTimer: Timer?
     private var lastProgressValue: UInt8?
@@ -298,6 +300,20 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     
     public init(frame: CGRect, font: UIFont?) {
         self.fontSet = FontSet (font: font ?? FontSet.defaultFont)
+        cellDimension = CellDimension(width: 1, height: 1)
+        super.init (frame: frame)
+        isAccessibilityElement = true
+        accessibilityTraits.formUnion([.staticText, .causesPageTurn])
+        accessibilityTextualContext = .sourceCode
+        setup()
+    }
+
+    public init(frame: CGRect, font: UIFont?, terminalOptions: TerminalOptions,
+                initialGeometry: TerminalInitialGeometry?, autoResizeGrid: Bool) {
+        self.fontSet = FontSet (font: font ?? FontSet.defaultFont)
+        self.startupOptions = terminalOptions
+        self.initialGeometry = initialGeometry
+        self.autoResizeGrid = autoResizeGrid
         cellDimension = CellDimension(width: 1, height: 1)
         super.init (frame: frame)
         isAccessibilityElement = true

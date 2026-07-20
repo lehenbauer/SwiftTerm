@@ -37,6 +37,17 @@ typealias TTBezierPath = NSBezierPath
 public typealias TTImage = NSImage
 #endif
 
+/// How a TerminalView resolves its terminal's first logical grid.
+public enum TerminalInitialGeometry {
+    /// An authoritative logical grid (e.g. a known tmux pane size).
+    /// Wins over any nonzero frame.
+    case grid(cols: Int, rows: Int)
+    /// The view's anticipated bounds in points. SwiftTerm applies its own
+    /// chrome math (macOS scroller reservation) exactly as it does for a live
+    /// frame. Pass the size the view will occupy, not a pre-shrunk content size.
+    case viewport(CGSize)
+}
+
 /// Controls how links are discovered during pointer/hover tracking in terminal views.
 public enum LinkReporting {
     /// Disable link tracking.
@@ -271,7 +282,7 @@ extension TerminalView {
         resetCaches()
         self.cellDimension = computeFontDimensions ()
         if (frame.width > 0) && (frame.height > 0) {
-            let newCols = Int(frame.width / cellDimension.width)
+            let newCols = Int(getEffectiveWidth(size: frame.size) / cellDimension.width)
             let newRows = Int(frame.height / cellDimension.height)
             if boundsMayMutateGrid {
                 if preservingTerminalModes {
@@ -309,16 +320,28 @@ extension TerminalView {
         // Get the ascent + descent + leading from the font, already scaled for the font's size
         self.cellDimension = computeFontDimensions ()
 
-        let zeroSizedView = width == 0 && height == 0
-        let terminalOptions = zeroSizedView
-            ? (terminal?.options ?? .default)
-            : TerminalOptions(cols: Int(width / cellDimension.width),
-                              rows: Int(height / cellDimension.height))
-
         if terminal == nil {
-            terminal = Terminal(delegate: self, options: terminalOptions)
-        } else if !zeroSizedView {
-            terminal.options = terminalOptions
+            var opts = startupOptions
+            switch initialGeometry {
+            case .grid(let cols, let rows):
+                opts.cols = cols
+                opts.rows = rows
+            case .viewport(let size) where size.width.isFinite && size.height.isFinite &&
+                                                   size.width > 0 && size.height > 0:
+                opts.cols = Int(getEffectiveWidth(size: size) / cellDimension.width)
+                opts.rows = Int(size.height / cellDimension.height)
+            case .viewport, .none:
+                if initialGeometry == nil && (width != 0 || height != 0) {
+                    opts.cols = Int(width / cellDimension.width)
+                    opts.rows = Int(height / cellDimension.height)
+                }
+            }
+            terminal = Terminal(delegate: self, options: opts)
+        } else if width != 0 || height != 0 {
+            var opts = terminal.options
+            opts.cols = Int(width / cellDimension.width)
+            opts.rows = Int(height / cellDimension.height)
+            terminal.options = opts
             terminal.setup(isReset: false)
         }
         terminal.backgroundColor = Color.defaultBackground

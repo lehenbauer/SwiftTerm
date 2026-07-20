@@ -73,6 +73,13 @@ open class LocalProcessTerminalView: TerminalView, TerminalViewDelegate, LocalPr
         super.init (frame: frame)
         setup ()
     }
+
+    public override init(frame: CGRect, font: NSFont?, terminalOptions: TerminalOptions,
+                         initialGeometry: TerminalInitialGeometry?, autoResizeGrid: Bool) {
+        super.init(frame: frame, font: font, terminalOptions: terminalOptions,
+                   initialGeometry: initialGeometry, autoResizeGrid: autoResizeGrid)
+        setup()
+    }
     
     public required init? (coder: NSCoder)
     {

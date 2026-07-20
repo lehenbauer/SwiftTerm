@@ -183,6 +183,8 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// Whether pixel geometry is allowed to change the terminal's logical grid.
     /// Defaults to true to preserve the historical behavior for all consumers.
     public var autoResizeGrid: Bool = true
+    var startupOptions: TerminalOptions = .default
+    var initialGeometry: TerminalInitialGeometry?
 
     /// Marked (uncommitted) text from an input source (IME, dictation, etc.).
     private var markedTextStorage: NSAttributedString?
@@ -236,6 +238,17 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     
     public init(frame: CGRect, font: NSFont?) {
         self.fontSet = FontSet (font: font ?? FontSet.defaultFont)
+
+        super.init (frame: frame)
+        setup()
+    }
+
+    public init(frame: CGRect, font: NSFont?, terminalOptions: TerminalOptions,
+                initialGeometry: TerminalInitialGeometry?, autoResizeGrid: Bool) {
+        self.fontSet = FontSet (font: font ?? FontSet.defaultFont)
+        self.startupOptions = terminalOptions
+        self.initialGeometry = initialGeometry
+        self.autoResizeGrid = autoResizeGrid
 
         super.init (frame: frame)
         setup()
@@ -911,7 +924,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     }
 
     private var reservedScrollerWidth: CGFloat {
-        scroller?.isHidden == true ? 0 : scrollerWidth
+        scrollerStyle == .legacy ? scrollerWidth : 0
     }
 
     /**
