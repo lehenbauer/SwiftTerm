@@ -1,5 +1,14 @@
 # Current State
 
+## 2026-07-20 (later)
+
+- Merged `feature/terminal-inspection-pr1` into `main` (`164fb11` tip): public
+  `Terminal.inspect()` + view `inspectGeometry`/`inspectInputPolicy`/`inspectAll`
+  for client third-witness dumps; Codable snapshots; full `swift test` green in
+  worktree before merge. Whisp pin/adoption lands separately.
+- Design/reviews: `untracked/DESIGN-terminal-inspection.md`, Fable + sol red-team
+  reports under `untracked/`.
+
 ## 2026-07-20
 
 - Merged `feature/initial-geometry` into `main` fast-forward (`9a82b23`):
