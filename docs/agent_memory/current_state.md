@@ -12,8 +12,12 @@
   `make mac-client` green against `9a82b23` (pin flipped on its
   `feature/initial-geometry-adoption` branch; Whisp mirror adoption + live
   drill in flight there).
-- Push of `main` to origin: pending Karl (branch `feature/initial-geometry`
-  already on origin at `9a82b23`; main push is a ref fast-forward).
+- Pushed `main` to origin at `0b539b7` with Karl's approval the same night;
+  fork and origin in sync. The live-exercise validation leg was satisfied by
+  the Whisp adoption drill (12/12 mirrors born at model grid, zero
+  `feed_grid_mismatch`; `../ai-whisperer` merge `aac1c84d`,
+  handoff `2026-07-20-initial-geometry-adoption.md` there). Whisp pins this
+  fork at `9a82b23`.
 
 ## 2026-07-14
 
