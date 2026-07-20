@@ -682,6 +682,9 @@ open class Terminal {
         ansiColors = defaultAnsiColors
         tdel = delegate
         self.options = options
+        cols = max(options.cols, MINIMUM_COLS)
+        rows = max(options.rows, MINIMUM_ROWS)
+        tabStopWidth = max(1, options.tabStopWidth)
         // This duplicates the setup above, but
         parser = EscapeSequenceParser()
         normalBuffer = Buffer(cols: cols, rows: rows, tabStopWidth: tabStopWidth, scrollback: options.scrollback)
@@ -698,8 +701,6 @@ open class Terminal {
         
         normalBuffer.scroll = { [weak self] wrapped in self?.scroll(isWrapped: wrapped) }
         altBuffer.scroll = { [weak self] wrapped in self?.scroll(isWrapped: wrapped) }
-
-        setupTabStops()
 
         setup()
     }
@@ -847,13 +848,28 @@ open class Terminal {
         // call this
         cols = max (options.cols, MINIMUM_COLS)
         rows = max (options.rows, MINIMUM_ROWS)
+        let newTabWidth = max(1, options.tabStopWidth)
+        let tabWidthChanged = newTabWidth != tabStopWidth
+        tabStopWidth = newTabWidth
         
         if isReset {
             resetNormalBuffer()
             activateNormalBuffer(clearAlt: false)
-        } else {
+            if altBuffer.cols != cols || altBuffer.rows != rows {
+                altBuffer.resize(newCols: cols, newRows: rows)
+            }
+            altBuffer.setupTabStops(tabStopWidth: tabStopWidth)
+        } else if normalBuffer.cols != cols || normalBuffer.rows != rows ||
+                    altBuffer.cols != cols || altBuffer.rows != rows {
+            let oldCols = normalBuffer.cols
             normalBuffer.resize(newCols: cols, newRows: rows)
             altBuffer.resize(newCols: cols, newRows: rows)
+            normalBuffer.setupTabStops(index: oldCols, tabStopWidth: tabStopWidth)
+            altBuffer.setupTabStops(index: oldCols, tabStopWidth: tabStopWidth)
+        }
+        if tabWidthChanged {
+            normalBuffer.setupTabStops(tabStopWidth: tabStopWidth)
+            altBuffer.setupTabStops(tabStopWidth: tabStopWidth)
         }
         cursorHidden = false
         
@@ -880,10 +896,14 @@ open class Terminal {
         mouseMode = .off
         mouseShiftCapture = false
 
-        buffer.scrollTop = 0
-        buffer.scrollBottom = rows-1
-        buffer.marginLeft = 0
-        buffer.marginRight = cols-1
+        normalBuffer.scrollTop = 0
+        normalBuffer.scrollBottom = rows-1
+        normalBuffer.marginLeft = 0
+        normalBuffer.marginRight = cols-1
+        altBuffer.scrollTop = 0
+        altBuffer.scrollBottom = rows-1
+        altBuffer.marginLeft = 0
+        altBuffer.marginRight = cols-1
         
         cc.send8bit = false
         conformance = .vt500

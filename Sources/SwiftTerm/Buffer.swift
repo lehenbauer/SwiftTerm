@@ -582,6 +582,7 @@ public final class Buffer {
     
     func setupTabStops (index: Int = -1, tabStopWidth: Int)
     {
+        let width = max(1, tabStopWidth)
         var idx = index
         
         if idx != -1 {
@@ -600,7 +601,7 @@ public final class Buffer {
             tabStops = Array.init (repeating: false, count: cols)
             idx = 0
         }
-        for i in stride(from: idx, to: cols, by: tabStopWidth) {
+        for i in stride(from: idx, to: cols, by: width) {
             tabStops [i] = true
         }
     }
