@@ -69,12 +69,18 @@ headless.send(data: [0x03][...])  // Ctrl-C
 ## Custom Terminal Size
 
 Pass a ``TerminalOptions`` with the desired dimensions. Applications running in
-the terminal will see this size and format their output accordingly:
+the terminal will see this size and format their output accordingly. Both buffers
+are allocated directly at this grid before input is processed; the engine does
+not construct at 80x25 and resize afterward:
 
 ```swift
 let options = TerminalOptions(cols: 132, rows: 50, scrollback: 5000)
 let headless = HeadlessTerminal(options: options) { _ in }
 ```
+
+`tabStopWidth` also applies to this first allocation. Values below 1 are clamped
+to 1, and columns or rows below the engine minimums are clamped before either
+buffer is created.
 
 ## Dispatch Queue
 

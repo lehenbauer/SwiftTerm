@@ -148,6 +148,34 @@ class TerminalViewController: UIViewController, TerminalViewDelegate {
 Since iOS does not support spawning local processes, you will typically connect
 to a remote host via SSH. See <doc:SSHIntegration> for details.
 
+## Choosing the Initial Geometry
+
+Use ``TerminalInitialGeometry`` when the terminal must exist at a known grid or
+viewport before the first byte is processed. The new initializer requires both
+the startup options and the ongoing resize policy:
+
+```swift
+let terminalView = TerminalView(
+    frame: .zero,
+    font: nil,
+    terminalOptions: TerminalOptions(scrollback: 2_000),
+    initialGeometry: .grid(cols: 120, rows: 40),
+    autoResizeGrid: false
+)
+```
+
+Use `.grid(cols:rows:)` for an authoritative logical size. Use `.viewport(_:)`
+for anticipated view bounds in points; pass the full size the view will occupy,
+not a content size pre-shrunk for a macOS scroller. SwiftTerm applies the same
+chrome and font-cell math used by later layout. `autoResizeGrid` controls whether
+subsequent bounds and font changes may resize the logical grid.
+
+If a `TerminalView` subclass declares its own designated initializers, add a
+passthrough initializer with the same arguments to expose this construction path.
+When using viewport-derived geometry with `autoResizeGrid: true`, start a child
+process after the first layout if the process must not receive a startup size
+correction.
+
 ## Headless: Scripting and Testing
 
 ``HeadlessTerminal`` runs a terminal emulator without any UI, useful for scripting
