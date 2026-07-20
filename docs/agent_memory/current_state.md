@@ -1,5 +1,20 @@
 # Current State
 
+## 2026-07-20
+
+- Merged `feature/initial-geometry` into `main` fast-forward (`9a82b23`):
+  terminals construct directly at the resolved `TerminalOptions` grid (no
+  provisional 80x25), new `TerminalInitialGeometry` + atomic view
+  initializer, style-based macOS scroller reservation, wide-grid tab-stop
+  and `tabStopWidth` defects fixed — `handoffs/2026-07-20-initial-geometry.md`.
+- Validation: `swift build`; `swift test --no-parallel` (517/49 + 43 XCTest,
+  Metal hardware); iOS platform xcodebuild; `../ai-whisperer`
+  `make mac-client` green against `9a82b23` (pin flipped on its
+  `feature/initial-geometry-adoption` branch; Whisp mirror adoption + live
+  drill in flight there).
+- Push of `main` to origin: pending Karl (branch `feature/initial-geometry`
+  already on origin at `9a82b23`; main push is a ref fast-forward).
+
 ## 2026-07-14
 
 - Merged `fix/mirror-grid-pin` (`a503a72`, pushed to origin during the Whisp

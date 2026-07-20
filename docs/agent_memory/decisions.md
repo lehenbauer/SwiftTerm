@@ -1,5 +1,12 @@
 # Decisions
 
+## 2026-07-20
+
+- Construction never resizes: `Terminal.init` builds buffers at the resolved options grid and `setup(isReset:)` guards buffer resize by size mismatch. Do not reintroduce resize-as-initialization, and keep the guard size-based — `setup()` is public "apply changes" API.
+- The initial-geometry view initializer keeps `terminalOptions` and `autoResizeGrid` WITHOUT default values: a default on the former creates overload ambiguity with `init(frame:font:)`, a default on the latter silently turns an authoritative `.grid` into follow-view at first layout.
+- `.viewport` is spelled `.viewport(points:)` and takes view points; never accept device pixels or mix backing scale into grid division.
+- macOS scroller reservation is style-based (legacy reserves, overlay none), replacing visibility-based reservation that made column math depend on scroll state at measure time. Do not revert to `isHidden`-based reservation.
+
 ## 2026-06-27
 
 - For the upstream full-width glyph centering merge, resolve `AppleTerminalView.updateCursorPosition` by using the fork's clamped `cursorColumn` everywhere the caret indexes/positions the cursor, while also applying upstream's `charUnderCursor.width` sizing so full-width cells get a full-width caret.
