@@ -161,9 +161,21 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     private var activeCommandKeys: Set<UIKeyboardHIDUsage> = []
     private var pointerInteraction: UIPointerInteraction?
     private var hoverGesture: UIHoverGestureRecognizer?
+    private var _editMenuInteraction: Any? = nil
     private var didFinishSetup = false
     var linkHighlightRange: [Terminal.LinkMatch.RowRange]?
     private var lastPointerLocation: CGPoint?
+
+    @available(iOS 16.0, *)
+    private var editMenuInteraction: UIEditMenuInteraction {
+        if let interaction = _editMenuInteraction as? UIEditMenuInteraction {
+            return interaction
+        }
+        let interaction = UIEditMenuInteraction(delegate: self)
+        addInteraction(interaction)
+        _editMenuInteraction = interaction
+        return interaction
+    }
     
     /**
      * If set, this turns Option-letter keystrokes into an escape + keystroke combination
@@ -604,21 +616,29 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     ///  - pos: the location where this was triggered in the buffer, it used at a later point
     ///  to auto-select a word
     func showContextMenu (forRegion: CGRect, pos: Position) {
-        var items: [UIMenuItem] = []
-        
         lastLongSelect = pos
         lastLongSelectRegion = forRegion
 
-        //GAR: Declutter context menu
-        //items.append (UIMenuItem(title: "Reset", action: #selector(resetCmd)))
-        
-        // Configure the shared menu controller
-        let menuController = UIMenuController.shared
-        menuController.menuItems = items
-        
-        // Set the location of the menu in the view.
-        //let menuLocation = CGRect (origin: at, size: CGSize (width: cellDimension.width, height: cellDimension.height))
-        menuController.showMenu(from: self, rect: forRegion)
+        if #available(iOS 16.0, *) {
+            editMenuInteraction.dismissMenu()
+            let configuration = UIEditMenuConfiguration(identifier: nil,
+                                                         sourcePoint: CGPoint(x: forRegion.midX,
+                                                                              y: forRegion.minY))
+            editMenuInteraction.presentEditMenu(with: configuration)
+        } else {
+            var items: [UIMenuItem] = []
+
+            //GAR: Declutter context menu
+            //items.append (UIMenuItem(title: "Reset", action: #selector(resetCmd)))
+
+            // Configure the shared menu controller
+            let menuController = UIMenuController.shared
+            menuController.menuItems = items
+
+            // Set the location of the menu in the view.
+            //let menuLocation = CGRect (origin: at, size: CGSize (width: cellDimension.width, height: cellDimension.height))
+            menuController.showMenu(from: self, rect: forRegion)
+        }
     }
     
     // This is a position relative to the buffer
@@ -3289,6 +3309,32 @@ extension TerminalView: UIAccessibilityReadingContent {
         let end = Position(col: terminal.buffer.lines[startLine].count,
                            row: startLine + lines)
         return accessibilityAttributedDisplayText(start: start, end: end)
+    }
+}
+
+@available(iOS 16.0, *)
+extension TerminalView: UIEditMenuInteractionDelegate {
+    public func editMenuInteraction(_ interaction: UIEditMenuInteraction,
+                                     menuFor configuration: UIEditMenuConfiguration,
+                                     suggestedActions: [UIMenuElement]) -> UIMenu? {
+        var actions: [UIAction] = []
+        if selection.active {
+            actions.append(UIAction(title: "Copy") { [weak self] _ in
+                self?.copy(nil)
+            })
+        }
+        actions.append(UIAction(title: "Paste") { [weak self] _ in
+            self?.paste(nil)
+        })
+        if !selection.active {
+            actions.append(UIAction(title: "Select") { [weak self] _ in
+                self?.select(nil)
+            })
+        }
+        actions.append(UIAction(title: "Select All") { [weak self] _ in
+            self?.selectAll(nil)
+        })
+        return UIMenu(children: actions)
     }
 }
 
