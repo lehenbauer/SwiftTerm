@@ -114,6 +114,25 @@ final class SelectionTests: TerminalDelegate {
         #expect(!terminal.userScrolling)
     }
 
+    @Test func testScrollToMarksTerminalAsUserScrolling() {
+        let view = TerminalView(frame: CGRect(origin: .zero, size: .init(width: 400, height: 100)))
+
+        for i in 0..<30 {
+            view.terminal.feed(text: "line \(i)\r\n")
+        }
+
+        let bottom = view.terminal.displayBuffer.yDisp
+        let target = max(0, bottom - 3)
+        view.scrollTo(row: target)
+
+        #expect(view.terminal.userScrolling)
+        view.terminal.feed(text: "incoming\r\n")
+        #expect(view.terminal.displayBuffer.yDisp == target)
+
+        view.scrollTo(row: view.terminal.displayBuffer.yBase)
+        #expect(!view.terminal.userScrolling)
+    }
+
     @Test func testZeroSizedResizeDoesNotChangeTerminalDimensions() {
         let view = TerminalView(frame: CGRect(origin: .zero, size: .init(width: 320, height: 160)))
         let originalCols = view.terminal.cols
@@ -171,6 +190,30 @@ final class SelectionTests: TerminalDelegate {
         #expect(!scroller.isHidden)
         #expect(scroller.alphaValue == 0)
         #expect(!scroller.isEnabled)
+    }
+
+    @Test func testSelectionColorsOverrideCellAndDecorationColors() {
+        let view = TerminalView(frame: CGRect(origin: .zero, size: .init(width: 320, height: 160)))
+        let selectionBackground = NSColor(srgbRed: 0, green: 166.0 / 255.0, blue: 178.0 / 255.0, alpha: 1.0)
+        let selectionForeground = NSColor.black
+
+        #expect(view.selectedTextBackgroundColor.isEqual(selectionBackground))
+        #expect(view.selectedTextForegroundColor.isEqual(selectionForeground))
+
+        view.terminal.feed(text: "\u{001B}[31;44;4;9mX")
+        view.selection.setSelection(start: Position(col: 0, row: 0), end: Position(col: 1, row: 0))
+
+        let renderedLine = view.buildAttributedString(
+            row: 0,
+            line: view.terminal.displayBuffer.lines[0],
+            cols: view.terminal.cols
+        )
+        let attributes = renderedLine.segments[0].attributedString.attributes(at: 0, effectiveRange: nil)
+
+        #expect((attributes[.selectionBackgroundColor] as? NSColor)?.isEqual(selectionBackground) == true)
+        #expect((attributes[.foregroundColor] as? NSColor)?.isEqual(selectionForeground) == true)
+        #expect((attributes[.underlineColor] as? NSColor)?.isEqual(selectionForeground) == true)
+        #expect((attributes[.strikethroughColor] as? NSColor)?.isEqual(selectionForeground) == true)
     }
 #endif
 
