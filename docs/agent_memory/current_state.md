@@ -1,5 +1,28 @@
 # Current State
 
+## 2026-08-08
+
+- Merged upstream `cf7764f` (52 commits: BiDi/Arabic, Metal
+  BufferPool/atlas/Bundle.module fixes, Hangul IME, DECCOLM gating, parser
+  hardening, line-accurate scroll wheel) into `main` as `affe8412`, plus plain
+  commit `b2c68bc` translating selections across `prependScrollbackCapture` —
+  `handoffs/2026-08-08-upstream-sync-cf7764f.md`.
+- Validation: full serial suite green on Metal hardware (654/63 + XCTest);
+  `../ai-whisperer` `make mac-client` green via temporary local pin;
+  Benchmarks show an accepted upstream-inherent ~3-4% feed cost from BiDi
+  bookkeeping (root-cause + ablation in the handoff; see decisions.md).
+- All eight merge conflicts resolved combining both sides; every fork surface
+  verified surviving (autoResizeGrid, initial geometry, inspect API,
+  pending-wrap caret clamp now feeding BiDi caret mapping, line-info caches,
+  iOS `UIEditMenuInteraction`, non-monotonic `linesTop`).
+- Live exercise: Karl ran `make mac-combined-run` on ai-whisperer branch
+  `feature/swiftterm-upstream-cf7764f-adoption` (pin at `b2c68bc`) — typing,
+  scroll wheel, selection, and multi-pane mouse-mode TUIs all pass. Pushed
+  `main` to origin with Karl's approval the same day; the adoption branch
+  re-pins to the GitHub URL for the durable Whisp flip.
+- Not yet done: land the adoption branch in ai-whisperer `main`, RenderBench
+  GUI baseline, BiDi disabled-mode fast path.
+
 ## 2026-07-20 (later)
 
 - Merged `feature/terminal-inspection-pr1` into `main` (`164fb11` tip): public
@@ -73,33 +96,3 @@
   - `swift test --no-parallel`
 - After the merge, `git rev-list --count main..upstream/main` is `0`. No push was performed.
 
-## 2026-06-16
-
-- `main`, `origin/main`, `whisp/foundation`, and `origin/whisp/foundation` are all at `a5254aa` (`Merge upstream main into Whisp SwiftTerm`); a no-op `git push origin main whisp/foundation` confirmed the GitHub fork is current.
-- Local branch `agent/update-main-upstream-20260528` is obsolete scratch state, not missing Whisp work: it is not merged by ancestry, but diffing it against current `main` would roll back newer fork files/tests and delete current local project memory.
-
-## 2026-06-07
-
-- `whisp/foundation` at `e71d904` is 55 commits ahead and 9 commits behind Miguel de Icaza's `upstream/main` at `bf72355` after fetching `https://github.com/migueldeicaza/SwiftTerm.git`.
-- A temporary trial merge of `upstream/main` into `whisp/foundation` found one conflict only: add/add in `Sources/SwiftTerm/SyncDebug.swift`.
-- With the conflict resolved by keeping the local no-op `SyncDebug.log`, the merged result changes only:
-  - `Sources/SwiftTerm/Mac/MacTerminalView.swift`
-  - `Sources/SwiftTerm/iOS/iOSTerminalView.swift`
-  - `Tests/SwiftTermTests/KittyOptionComposeTests.swift`
-- Validation in the trial merge passed with `swift test --no-parallel`. A parallel `swift test` run aborted with signal 6 in the Swift Testing harness, but targeted tests and the serial full suite passed.
-- Applied the upstream merge on `whisp/foundation` as `3a1bfaf` (`Merge upstream/main into whisp foundation`). The branch is no longer behind `upstream/main`.
-- Final validation after the real merge passed:
-  - `swift test --filter KittyOptionComposeTests`
-  - `swift test --filter SynchronizedOutputTests`
-  - `swift test --filter KittyKeyboardEncoderTests`
-  - `swift test --no-parallel`
-
-## 2026-06-15
-
-- Fetched Miguel de Icaza's `main` into `refs/remotes/upstream/main` at `a3b8c9b`; `whisp/foundation` at `3a1bfaf` is 56 commits ahead and 13 commits behind.
-- A dry merge of `upstream/main` into `whisp/foundation` applied cleanly with no conflicts. Net incoming changes touch only `Buffer.swift`, `LocalProcess.swift`, `Terminal.swift`, `TerminalViewSearch.swift`, and `MouseTrackingTests.swift`.
-- Upstream's first two incoming commits (`05361a4`, `2d8234f`) cancel each other out; they have no net merge effect.
-- Semantic caution for a future merge: upstream's new `Buffer.totalLinesTrimmed` accessor documents `linesTop` as monotonic, but this fork's `prependScrollbackCapture` decrements `linesTop` when older rows are inserted.
-- Dry-merge validation passed:
-  - `swift test --filter 'MouseTrackingTests|SearchTests|ReflowPortedTests|RetainCycleTests'`
-  - `swift test --no-parallel`

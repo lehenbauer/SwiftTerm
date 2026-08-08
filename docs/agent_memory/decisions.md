@@ -1,5 +1,17 @@
 # Decisions
 
+## 2026-08-08
+
+- The ~3-4% feed-throughput cost of upstream's BiDi paragraph bookkeeping
+  (`db31f3a`) is accepted and upstream-inherent; do not strip `bidiState`
+  propagation from the LF/wrap/scroll hot path to recover it — the propagation
+  is semantically required in the default `.implicit` mode, and a guard-only
+  equality check measured as a wash. Recovery requires a designed mode-gated
+  fast path (see 2026-08-08 handoff), ideally offered upstream.
+- Upstream tracks generated `Tools/BidiHarness/Scripts/__pycache__/*.pyc`
+  files; deliberately not removed in this fork. A local strip commit would
+  conflict at every future sync — wait for upstream to clean it.
+
 ## 2026-07-20
 
 - Construction never resizes: `Terminal.init` builds buffers at the resolved options grid and `setup(isReset:)` guards buffer resize by size mismatch. Do not reintroduce resize-as-initialization, and keep the guard size-based — `setup()` is public "apply changes" API.
