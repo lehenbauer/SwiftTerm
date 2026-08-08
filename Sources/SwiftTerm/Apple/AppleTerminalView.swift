@@ -22,7 +22,7 @@ let SwiftTermUnderlineStyleKey = NSAttributedString.Key("SwiftTermUnderlineStyle
 #if os(iOS) || os(visionOS)
 import UIKit
 public typealias TTColor = UIColor
-typealias TTFont = UIFont
+public typealias TTFont = UIFont
 typealias TTRect = CGRect
 typealias TTBezierPath = UIBezierPath
 public typealias TTImage = UIImage
@@ -31,7 +31,7 @@ public typealias TTImage = UIImage
 #if os(macOS)
 import AppKit
 public typealias TTColor = NSColor
-typealias TTFont = NSFont
+public typealias TTFont = NSFont
 typealias TTRect = CGRect
 typealias TTBezierPath = NSBezierPath
 public typealias TTImage = NSImage
@@ -529,13 +529,19 @@ extension TerminalView {
         return false
     }
     
-    // Computes the font dimensions once font.normal has been set
-    func computeFontDimensions () -> CellDimension
+    /// Computes the cell dimensions used by `TerminalView` for a font and display scale.
+    ///
+    /// - Parameters:
+    ///   - font: The terminal font.
+    ///   - backingScale: The number of device pixels per point.
+    ///   - lineSpacing: A multiplier for the font's line height.
+    /// - Returns: The pixel-snapped cell size in points.
+    public static func cellMetrics(font: TTFont, backingScale: CGFloat, lineSpacing: CGFloat = 1) -> CGSize
     {
-        let lineAscent = CTFontGetAscent (fontSet.normal)
-        let lineDescent = CTFontGetDescent (fontSet.normal)
-        let lineLeading = CTFontGetLeading (fontSet.normal)
-        let cellHeight = ceil((lineAscent + lineDescent + lineLeading) * _lineSpacing)
+        let lineAscent = CTFontGetAscent (font)
+        let lineDescent = CTFontGetDescent (font)
+        let lineLeading = CTFontGetLeading (font)
+        let cellHeight = ceil((lineAscent + lineDescent + lineLeading) * lineSpacing)
         #if os(macOS)
         // The following is a more robust way of getting the largest ascii character width, but comes with a performance hit.
         // See: https://github.com/migueldeicaza/SwiftTerm/issues/286
@@ -548,17 +554,24 @@ extension TerminalView {
         // let cellWidth = (0..<95).reduce(into: 0) { partialResult, idx in
         //     partialResult = max(partialResult, sizes[idx].width)
         // }
-        let glyph = fontSet.normal.glyph(withName: "W")
-        let cellWidth = fontSet.normal.advancement(forGlyph: glyph).width
+        let glyph = font.glyph(withName: "W")
+        let cellWidth = font.advancement(forGlyph: glyph).width
         #else
-        let fontAttributes = [NSAttributedString.Key.font: fontSet.normal]
+        let fontAttributes = [NSAttributedString.Key.font: font]
         let cellWidth = "W".size(withAttributes: fontAttributes).width
         #endif
         // Snap to pixel grid to avoid sub-pixel seams between adjacent cells
-        let scale = backingScaleFactor()
-        let snappedWidth = (cellWidth * scale).rounded() / scale
-        let snappedHeight = ceil(cellHeight * scale) / scale
+        let snappedWidth = (cellWidth * backingScale).rounded() / backingScale
+        let snappedHeight = ceil(cellHeight * backingScale) / backingScale
         return CellDimension(width: max(1, snappedWidth), height: max(min(snappedHeight, 8192), 1))
+    }
+
+    // Computes the font dimensions once font.normal has been set.
+    func computeFontDimensions (backingScale: CGFloat? = nil) -> CellDimension
+    {
+        Self.cellMetrics(font: fontSet.normal,
+                         backingScale: backingScale ?? backingScaleFactor(),
+                         lineSpacing: _lineSpacing)
     }
 
     /// Computes how to center `glyph` within its `columnWidth`-cell slot (and

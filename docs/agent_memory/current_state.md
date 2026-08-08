@@ -22,6 +22,9 @@
   re-pins to the GitHub URL for the durable Whisp flip.
 - Not yet done: land the adoption branch in ai-whisperer `main`, RenderBench
   GUI baseline, BiDi disabled-mode fast path.
+- Branch `fix/shared-cell-metrics` exposes the renderer's snapped cell-size
+  computation as `TerminalView.cellMetrics`; full serial tests pass —
+  `handoffs/2026-08-08-shared-cell-metrics-api.md`.
 
 ## 2026-07-20 (later)
 
@@ -95,4 +98,3 @@
   - `swift test --filter 'SynchronizedOutputTests|SelectionTests|UnicodeTests|BufferTests|TerminalViewCursorTests' --no-parallel`
   - `swift test --no-parallel`
 - After the merge, `git rev-list --count main..upstream/main` is `0`. No push was performed.
-
