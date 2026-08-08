@@ -257,4 +257,66 @@ final class SelectionScrollTests: XCTestCase {
         XCTAssertEqual (selection.pivot?.row, 3)
         XCTAssertEqual (selectedText (selection), "LINE_5")
     }
+
+    // MARK: - Scrollback hydration
+
+    func testSelectionFollowsTextWhenScrollbackIsPrepended () {
+        let terminal = makeTerminal (rows: 3, cols: 16)
+        terminal.feed (text: "visible one\r\nvisible two")
+
+        let selection = SelectionService (terminal: terminal)
+        selection.setSelection (start: Position (col: 0, row: 0), end: Position (col: 11, row: 0))
+        let textBeforePrepend = selectedText (selection)
+        XCTAssertEqual (textBeforePrepend, "visible one")
+
+        let inserted = terminal.prependScrollbackCapture (
+            byteArray: Array ("old one\r\nold two".utf8)[...],
+            maximumScrollback: 10
+        )
+
+        XCTAssertEqual (inserted, 2)
+        XCTAssertTrue (selection.active)
+        XCTAssertEqual (selection.start, Position (col: 0, row: 2))
+        XCTAssertEqual (selection.end, Position (col: 11, row: 2))
+        XCTAssertEqual (selectedText (selection), textBeforePrepend)
+    }
+
+    func testEmptyScrollbackPrependLeavesSelectionUntouched () {
+        let terminal = makeTerminal (rows: 3, cols: 16)
+        terminal.feed (text: "visible one")
+
+        let selection = SelectionService (terminal: terminal)
+        selection.setSelection (start: Position (col: 0, row: 0), end: Position (col: 11, row: 0))
+        let textBeforePrepend = selectedText (selection)
+        XCTAssertEqual (textBeforePrepend, "visible one")
+
+        let inserted = terminal.prependScrollbackCapture (byteArray: [][...], maximumScrollback: 10)
+
+        XCTAssertEqual (inserted, 0)
+        XCTAssertTrue (selection.active)
+        XCTAssertEqual (selection.start, Position (col: 0, row: 0))
+        XCTAssertEqual (selection.end, Position (col: 11, row: 0))
+        XCTAssertEqual (selectedText (selection), textBeforePrepend)
+    }
+
+    func testScrollbackPrependOnAlternateBufferLeavesSelectionUntouched () {
+        let terminal = makeTerminal (rows: 3, cols: 16)
+        terminal.feed (text: "\u{1b}[?1049halt visible")
+
+        let selection = SelectionService (terminal: terminal)
+        selection.setSelection (start: Position (col: 0, row: 0), end: Position (col: 11, row: 0))
+        let textBeforePrepend = selectedText (selection)
+        XCTAssertEqual (textBeforePrepend, "alt visible")
+
+        let inserted = terminal.prependScrollbackCapture (
+            byteArray: Array ("old one".utf8)[...],
+            maximumScrollback: 10
+        )
+
+        XCTAssertEqual (inserted, 0)
+        XCTAssertTrue (selection.active)
+        XCTAssertEqual (selection.start, Position (col: 0, row: 0))
+        XCTAssertEqual (selection.end, Position (col: 11, row: 0))
+        XCTAssertEqual (selectedText (selection), textBeforePrepend)
+    }
 }

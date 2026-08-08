@@ -6035,6 +6035,12 @@ open class Terminal {
         normalBuffer.yBase += insertedLines.count
         normalBuffer.yDisp += insertedLines.count
         normalBuffer.recalculateLinesWithImagesCount()
+        // Prepending shifts every existing row down by the inserted count.
+        selectionsAdjustForInPlaceScroll (
+            top: 0,
+            bottom: normalBuffer.lines.count - 1,
+            lines: -insertedLines.count
+        )
         refresh(startRow: 0, endRow: rows - 1)
         return insertedLines.count
     }
