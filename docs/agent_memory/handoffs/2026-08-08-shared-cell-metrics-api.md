@@ -27,3 +27,26 @@ portable across the existing macOS, iOS, and visionOS conditional builds.
 Downstream clients that need terminal layout metrics should call the public
 static API with the same font and backing scale used to construct their
 `TerminalView`; do not duplicate the font-advance snapping formula.
+
+## Regression context (why this API exists)
+
+After the cf7764f upstream sync, Karl reported Whisp Mac terminals no longer
+filling their windows (~4+ columns of dead right margin). Root cause chain:
+
+- Upstream `87a7888` changed cell-width snapping from
+  `ceil(cellWidth*scale)/scale` to `(cellWidth*scale).rounded()/scale`.
+  Menlo 12 @2x (7.2246pt advance): old 7.5pt/cell, new 7.0pt/cell. The
+  tighter spacing is upstream-intended, not a bug.
+- Whisp carried two private duplicates of the OLD ceil formula:
+  `NativeTerminalView.swiftTermCellMetrics` (fixed by ai-whisperer `e5fc910d`
+  delegating to this API) and a second legacy CoreText copy in
+  `MacWindowView.computeCellMetrics` feeding the workspace-window canvas
+  (fixed by `edeec636`, using the hosting window's live backing scale).
+- Residual margin after the first fix came from stale AppKit
+  `frameAutosaveName` point frames baked at 7.5pt-era sizes; the canvas
+  fix recomputes from current metrics at restore time.
+
+Verified live via the Fleet Supervisor client witnesses
+(`whisp_client_terminal_info`): 80-col panes on two workspaces report
+`bounds_w = 560 = 80 x 7.0` exactly. Diagnosis used the `Terminal.inspect()`
+API merged in the same sync.

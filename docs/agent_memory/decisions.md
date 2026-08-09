@@ -2,6 +2,10 @@
 
 ## 2026-08-08
 
+- Cell metrics have exactly one owner: `TerminalView.cellMetrics(font:backingScale:lineSpacing:)`.
+  Never duplicate the width/height snapping formula downstream — Whisp carried
+  two private copies of the old ceil formula, and upstream `87a7888`'s
+  ceil→rounded change silently desynced them (visible as a dead right margin).
 - The ~3-4% feed-throughput cost of upstream's BiDi paragraph bookkeeping
   (`db31f3a`) is accepted and upstream-inherent; do not strip `bidiState`
   propagation from the LF/wrap/scroll hot path to recover it — the propagation

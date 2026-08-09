@@ -22,8 +22,12 @@
   re-pins to the GitHub URL for the durable Whisp flip.
 - Not yet done: land the adoption branch in ai-whisperer `main`, RenderBench
   GUI baseline, BiDi disabled-mode fast path.
-- Branch `fix/shared-cell-metrics` exposes the renderer's snapped cell-size
-  computation as `TerminalView.cellMetrics`; full serial tests pass —
+- Merged `fix/shared-cell-metrics` to `main` (`19bb856`, pushed 2026-08-09
+  with Karl's approval): public `TerminalView.cellMetrics` is the single
+  owner of cell snapping. Fixed the post-sync Whisp dead-right-margin
+  regression (upstream `87a7888` ceil→rounded, 7.5→7.0pt at Menlo 12 @2x)
+  together with ai-whisperer `e5fc910d`+`edeec636`; live-verified
+  `bounds_w = cols x 7.0` via client witnesses —
   `handoffs/2026-08-08-shared-cell-metrics-api.md`.
 
 ## 2026-07-20 (later)
