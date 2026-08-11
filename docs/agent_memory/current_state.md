@@ -2,17 +2,27 @@
 
 ## 2026-08-11
 
-- Merged `fix/scrollback-caret-flash` to `main` (`9f3afe1`): CG caret no
-  longer flashes over scrollback during live updates — caret visibility now
-  solely owned by `updateCursorPosition()`; Mac/iOS DECTCEM delegates route
-  through it — `handoffs/2026-08-11-scrollback-caret-flash.md`.
-- Validation: full serial suite green on Metal hardware (657/63 + XCTest);
-  new tests verified to bite pre-fix; `../ai-whisperer` `make mac-client`
-  green via temporary local pin; Karl live-confirmed no flash.
-- Not pushed yet; ai-whisperer still carries the temporary `file://` pin at
-  `9f3afe1` (pbxproj + Package.resolved) pending push + durable re-pin.
-- Deferred Half B: scrolled-back full-viewport repaint overhead
-  (translate-or-skip invalidation; sketch in the handoff).
+- Merged `perf/scrollback-repaint-skip` to `main` (`4cec8f3`): scrolled-back
+  CG ticks skip invalidation unless an explicit repaint signal fires
+  (buffer identity / `fullRefreshGeneration` / `linesTop + yDisp` anchor /
+  out-of-live-space marks / viewport overlap); hover invalidation goes
+  direct-rect on CG; `Terminal.resize` bumps the generation. Design
+  survived two adversarial grok reviews (v1 REFUTED → fixed, v2 WEAKENED →
+  R1 closed) — `handoffs/2026-08-11-scrollback-repaint-skip.md`.
+- Merged `fix/scrollback-caret-flash` to `main` (`9f3afe1`, pushed): CG
+  caret no longer flashes over scrollback during live updates — caret
+  visibility solely owned by `updateCursorPosition()`; Mac/iOS DECTCEM
+  delegates route through it — `handoffs/2026-08-11-scrollback-caret-flash.md`.
+- Validation (both): full serial suite green on Metal hardware (668/63 +
+  XCTest); skip/flash tests verified to bite pre-fix; benchmarks flat vs
+  `main-9f3afe1`; `../ai-whisperer` `make mac-client` green; Karl
+  live-verified both.
+- `4cec8f3` not pushed yet; ai-whisperer carries a temporary `file://` pin
+  at `4cec8f3` pending push + durable re-pin (the `9f3afe1` re-pin landed
+  as ai-whisperer `7c2065f9`).
+- Half B follow-ups deliberately not done: partial-rect translation in the
+  overlap case, iOS full-bounds ticks, update-range coordinate
+  normalization (see handoff traps).
 
 ## 2026-08-08
 

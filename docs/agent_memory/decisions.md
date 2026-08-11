@@ -2,6 +2,21 @@
 
 ## 2026-08-11
 
+- While scrolled back, the CG renderer only repaints on explicit signals
+  (buffer identity, `fullRefreshGeneration`, `linesTop + yDisp` anchor,
+  out-of-live-space marks, viewport overlap) — plain live-row
+  `updateRange` marks are deliberately skipped. Any new "repaint what
+  the user sees" path must bump the generation (`updateFullScreen`),
+  move the anchor, or `setNeedsDisplay` directly; `Terminal.resize`
+  must keep its `updateFullScreen()` call (column reflow rewrites
+  scrolled-back history) — `4cec8f3`,
+  `handoffs/2026-08-11-scrollback-repaint-skip.md`.
+- CG hover-link invalidation must not route through `updateRange`: it
+  computes a viewport row, and the update range is live-screen space —
+  the two disagree while scrolled back. Keep the direct row-rect
+  `setNeedsDisplay` (Metal keeps `updateRange`; its `yDisp`-based
+  mapping is the one that consumes viewport rows correctly).
+
 - Caret visibility (CG renderer) has exactly one owner:
   `updateCursorPosition()`. The `showCursor`/`hideCursor` delegates must
   never add/remove the caret view directly — an unconditional `addSubview`
