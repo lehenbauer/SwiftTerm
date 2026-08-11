@@ -1,5 +1,19 @@
 # Current State
 
+## 2026-08-11
+
+- Merged `fix/scrollback-caret-flash` to `main` (`9f3afe1`): CG caret no
+  longer flashes over scrollback during live updates — caret visibility now
+  solely owned by `updateCursorPosition()`; Mac/iOS DECTCEM delegates route
+  through it — `handoffs/2026-08-11-scrollback-caret-flash.md`.
+- Validation: full serial suite green on Metal hardware (657/63 + XCTest);
+  new tests verified to bite pre-fix; `../ai-whisperer` `make mac-client`
+  green via temporary local pin; Karl live-confirmed no flash.
+- Not pushed yet; ai-whisperer still carries the temporary `file://` pin at
+  `9f3afe1` (pbxproj + Package.resolved) pending push + durable re-pin.
+- Deferred Half B: scrolled-back full-viewport repaint overhead
+  (translate-or-skip invalidation; sketch in the handoff).
+
 ## 2026-08-08
 
 - Merged upstream `cf7764f` (52 commits: BiDi/Arabic, Metal

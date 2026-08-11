@@ -1,5 +1,14 @@
 # Decisions
 
+## 2026-08-11
+
+- Caret visibility (CG renderer) has exactly one owner:
+  `updateCursorPosition()`. The `showCursor`/`hideCursor` delegates must
+  never add/remove the caret view directly — an unconditional `addSubview`
+  there re-creates the rapid caret flash over scrollback that DECTCEM
+  hide/show cycles from AI CLIs trigger (`9f3afe1`,
+  `handoffs/2026-08-11-scrollback-caret-flash.md`).
+
 ## 2026-08-08
 
 - Cell metrics have exactly one owner: `TerminalView.cellMetrics(font:backingScale:lineSpacing:)`.
