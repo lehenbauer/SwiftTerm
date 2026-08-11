@@ -3098,9 +3098,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             queueMetalDisplay()
             return
         }
-        if caretView.superview == nil {
-            addSubview(caretView)
-        }
+        updateCursorPosition()
     }
 
     open func hideCursor(source: Terminal) {
@@ -3108,7 +3106,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             queueMetalDisplay()
             return
         }
-        caretView.removeFromSuperview()
+        updateCursorPosition()
     }
     
     open func cursorStyleChanged (source: Terminal, newStyle: CursorStyle) {

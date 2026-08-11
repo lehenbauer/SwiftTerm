@@ -100,6 +100,64 @@ final class TerminalViewCursorTests {
         #expect(MetalTerminalRenderer.inactiveCursorOutlineThickness(scale: 2) == 3)
     }
 
+    @Test func testDectcemShowWhileScrolledBackKeepsCaretHidden() {
+        let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 120, height: 80))
+        view.resize(cols: 10, rows: 4)
+
+        let terminal = view.getTerminal()
+        for i in 0..<20 {
+            terminal.feed(text: "line \(i)\r\n")
+        }
+        #expect(view.caretView.superview === view)
+
+        // Scroll to the top of scrollback: the live cursor row is below the
+        // viewport, so the caret leaves the hierarchy.
+        view.scrollTo(row: 0)
+        #expect(view.caretView.superview == nil)
+
+        // An application DECTCEM hide/show cycle (an AI CLI redrawing its
+        // progress UI) must not re-add the caret while it is scrolled out of
+        // view — this was the rapid caret flash over scrollback.
+        terminal.feed(text: "\u{1b}[?25l")
+        #expect(view.caretView.superview == nil)
+        terminal.feed(text: "\u{1b}[?25h")
+        #expect(view.caretView.superview == nil)
+
+        // Returning to the bottom restores the caret.
+        view.scrollToBottom()
+        #expect(view.caretView.superview === view)
+    }
+
+    @Test func testDectcemShowRepositionsCaretWhenLiveCursorRowIsVisibleInScrollback() {
+        let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 120, height: 80))
+        view.resize(cols: 10, rows: 4)
+
+        let terminal = view.getTerminal()
+        for i in 0..<20 {
+            terminal.feed(text: "line \(i)\r\n")
+        }
+        // Park the live cursor on the top row of the live screen, then scroll
+        // back two rows so that row is still visible at screen row 2.
+        terminal.feed(text: "\u{1b}[H")
+        view.scrollUp(lines: 2)
+
+        let buffer = terminal.buffer
+        #expect(buffer.yBase - buffer.yDisp == 2)
+        #expect(view.caretView.superview === view)
+
+        // A DECTCEM hide/show cycle must bring the caret back at the correct
+        // viewport-relative position, not at whatever frame it last had.
+        terminal.feed(text: "\u{1b}[?25l")
+        #expect(view.caretView.superview == nil)
+        view.caretView.frame.origin = CGPoint(x: -100, y: -100)
+        terminal.feed(text: "\u{1b}[?25h")
+        #expect(view.caretView.superview === view)
+
+        let expectedY = view.frame.height - view.cellDimension.height * 3
+        #expect(abs(view.caretFrame.origin.y - expectedY) < 0.001)
+        #expect(abs(view.caretFrame.origin.x) < 0.001)
+    }
+
     @Test func testDarkThemeUsesContrastingBlockCursorTextColor() throws {
         let theme = TerminalTheme.swiftTermDark
         let caretText = try #require(theme.caretText)

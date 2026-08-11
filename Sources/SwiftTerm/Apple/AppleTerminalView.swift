@@ -2441,14 +2441,18 @@ extension TerminalView {
         //caretView.frame.origin = CGPoint(x: lineOrigin.x + (cellDimension.width * CGFloat(terminal.buffer.x)), y: lineOrigin.y)
         let buffer = terminal.displayBuffer
         let vy = buffer.yBase + buffer.y
-        
-        if vy >= buffer.yDisp + buffer.rows {
+
+        // Sole owner of caret visibility: shown only when the application wants
+        // it visible (DECTCEM) and the live cursor row is not below the visible
+        // viewport, which it is once the user scrolls back past it. The
+        // showCursor/hideCursor delegates route here, so a DECTCEM show while
+        // scrolled back cannot re-add the caret at a stale position.
+        if terminal.cursorHidden || vy >= buffer.yDisp + buffer.rows {
             caretView.removeFromSuperview()
             return
-        } else if terminal.cursorHidden == false && caretView.superview != self {
+        }
+        if caretView.superview != self {
             addSubview(caretView)
-        } else if terminal.cursorHidden == true && caretView.superview == self {
-            caretView.removeFromSuperview()
         }
         let doublePosition = buffer.lines [vy].renderMode == .single ? 1.0 : 2.0
         // Pending-wrap keeps x at cols until the next printable character.

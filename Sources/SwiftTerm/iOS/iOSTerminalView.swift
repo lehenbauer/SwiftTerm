@@ -3154,14 +3154,11 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
     
     open func showCursor(source: Terminal) {
-        guard let caretView else { return }
-        if caretView.superview == nil {
-            addSubview(caretView)
-        }
+        updateCursorPosition()
     }
 
     open func hideCursor(source: Terminal) {
-        caretView?.removeFromSuperview()
+        updateCursorPosition()
     }
     
     open func cursorStyleChanged (source: Terminal, newStyle: CursorStyle) {
