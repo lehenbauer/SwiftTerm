@@ -1333,6 +1333,24 @@ extension TerminalView {
         guard screenRow >= 0 && screenRow < terminal.rows else {
             return
         }
+        #if os(macOS)
+        var usesMetal = false
+        #if canImport(MetalKit)
+        usesMetal = metalView != nil
+        #endif
+        if !usesMetal {
+            // updateRange records rows in live-screen space, but screenRow is
+            // a viewport row; while scrolled back the two spaces disagree, so
+            // routing this mark through the update range would repaint the
+            // wrong row (or nothing). Invalidate the viewport row directly,
+            // extended one cell downward so underline/descender pixels below
+            // the strict row box are cleared too.
+            let rowBottom = frame.height - (CGFloat(screenRow) + 1) * cellDimension.height
+            setNeedsDisplay(CGRect(x: 0, y: max(0, rowBottom - cellDimension.height),
+                                   width: frame.width, height: cellDimension.height * 2))
+            return
+        }
+        #endif
         terminal.updateRange(borrowing: displayBuffer, screenRow)
     }
 
@@ -2328,22 +2346,21 @@ extension TerminalView {
                             dependencies.upperBound - displayBuffer.yDisp)
         }
         let baseLine = frame.height
-        var region: CGRect
+        var region: CGRect?
         // `rowStart`/`rowEnd` come from the terminal's update range, which is recorded
-        // in `buffer.y` space (relative to `yBase`, the live screen). The rect below
-        // maps them to the screen as if row `y` were screen row `y`, but
+        // in `buffer.y` space (relative to `yBase`, the live screen). The pinned rect
+        // below maps them to the screen as if row `y` were screen row `y`, but
         // drawTerminalContents maps screen rects back to buffer rows via `yDisp`.
         // Those two agree only while the viewport is pinned to the bottom. Once the
-        // user scrolls back by `k` rows, the cells that changed are drawn at screen
-        // row `y + k` while the invalidation still covers screen row `y`, so the rows
-        // that actually changed are never repainted and keep stale pixels until
-        // something forces a full redraw. Invalidate everything in that case; the
-        // draw still only repaints rows intersecting the dirty rect and reads each
-        // from its correct `yDisp`-relative buffer line.
+        // user scrolls back, scrolledBackInvalidationRegion decides between a
+        // full-frame repaint and skipping invalidation entirely when the change
+        // provably lies below the visible rows.
         if displayBuffer.yDisp != displayBuffer.yBase {
-            region = CGRect (x: 0, y: 0, width: frame.width, height: frame.height)
+            region = scrolledBackInvalidationRegion(buffer: displayBuffer,
+                                                    rowStart: rowStart, rowEnd: rowEnd)
         } else {
-            region = CGRect (x: 0,
+            noteRepaintTrackingState(buffer: displayBuffer)
+            var pinned = CGRect (x: 0,
                              y: baseLine - (cellDimension.height + CGFloat(redrawEnd) * cellDimension.height),
                              width: frame.width,
                              height: CGFloat(redrawEnd-redrawStart + 1) * cellDimension.height)
@@ -2351,18 +2368,19 @@ extension TerminalView {
             // If we are the last line, we should also queue a refresh for the "remaining" bits at the
             // end which can be redrawn by large unicode
             if redrawEnd == terminal.rows - 1 {
-                let oh = region.height
-                let oy = region.origin.y
-                region = CGRect (x: 0, y: 0, width: frame.width, height: oh + oy)
+                let oh = pinned.height
+                let oy = pinned.origin.y
+                pinned = CGRect (x: 0, y: 0, width: frame.width, height: oh + oy)
             } else {
                 // Region ends mid-screen (a restricted DECSTBM region): extend the
                 // invalidation down by one cell so the sub-cell remainder just below the
                 // band's bottom row (descenders / tall unicode) is cleared too. Previously
                 // only rowEnd == rows-1 got this, leaving a one-row ghost below the region.
                 let extra = cellDimension.height
-                let newY = max (0, region.origin.y - extra)
-                region = CGRect (x: 0, y: newY, width: frame.width, height: region.maxY - newY)
+                let newY = max (0, pinned.origin.y - extra)
+                pinned = CGRect (x: 0, y: newY, width: frame.width, height: pinned.maxY - newY)
             }
+            region = pinned
         }
 #if canImport(MetalKit)
         if metalView != nil {
@@ -2397,11 +2415,13 @@ extension TerminalView {
             setMetalDirtyRange(dirtyRange)
             noteMetalCursorActivityIfNeeded((x: buffer.x, y: buffer.yBase + buffer.y, hidden: terminal.cursorHidden))
             requestMetalDisplay()
-        } else {
+        } else if let region {
             setNeedsDisplay(region)
         }
 #else
-        setNeedsDisplay(region)
+        if let region {
+            setNeedsDisplay(region)
+        }
 #endif
         #else
         // TODO iOS: need to update the code above, but will do that when I get some real
@@ -2434,6 +2454,69 @@ extension TerminalView {
         }
     }
     
+    #if os(macOS)
+    /// Records the tick-to-tick comparison state for the CG scrolled-back
+    /// repaint skip. Called on every region pass — pinned and scrolled — so a
+    /// buffer switch or generation bump consumed while pinned is not
+    /// mistaken for "unchanged" on the next scrolled-back tick.
+    func noteRepaintTrackingState(buffer: Buffer) {
+        lastRepaintDisplayedAlt = terminal.isDisplayBufferAlternate
+        lastRepaintFullRefreshGeneration = terminal.fullRefreshGeneration
+        lastRepaintScrollbackAnchor = buffer.linesTop + buffer.yDisp
+    }
+
+    /// Decides what the CG renderer should invalidate for a display tick while
+    /// the viewport is scrolled back (`yDisp != yBase`). Returns the full frame
+    /// when anything that can change visible pixels happened, or nil (skip
+    /// invalidation entirely) when the update provably lies below the viewport.
+    /// The contract and its adversarial review live in
+    /// `docs/agent_memory/handoffs/` and `ScrollbackRepaintTests`.
+    func scrolledBackInvalidationRegion(buffer: Buffer, rowStart: Int, rowEnd: Int) -> CGRect? {
+        let fullFrame = CGRect(x: 0, y: 0, width: frame.width, height: frame.height)
+
+        let displayedAlt = terminal.isDisplayBufferAlternate
+        let generation = terminal.fullRefreshGeneration
+        // All-time identity of the line at the viewport top: recycle at
+        // capacity does linesTop += 1 / yDisp -= 1 (stable while the content
+        // under the viewport is stable), the compensation clamps at yDisp == 0
+        // (sum changes exactly when content slides), and prepending does
+        // linesTop -= n / yDisp += n (stable, content unchanged).
+        let anchor = buffer.linesTop + buffer.yDisp
+        let changed = lastRepaintDisplayedAlt != displayedAlt
+            || lastRepaintFullRefreshGeneration != generation
+            || lastRepaintScrollbackAnchor != anchor
+        noteRepaintTrackingState(buffer: buffer)
+        if changed {
+            return fullFrame
+        }
+        // Marks outside live-screen space cannot be translated: splice-based
+        // operations (ILM/DLM/SU/SD) record absolute buffer indices into the
+        // same min/max accumulator, and updateFullScreen marks rowEnd == rows.
+        if rowStart < 0 || rowEnd >= terminal.rows {
+            return fullFrame
+        }
+        // The changed live rows sit at absolute rows yBase+rowStart...; expand
+        // to their BiDi paragraph dependency range (a wrapped paragraph can
+        // span the yBase boundary into visible history) and intersect with the
+        // visible rows. Disjoint means nothing the user can see changed.
+        let maxRow = buffer.lines.count - 1
+        guard maxRow >= 0 else {
+            return fullFrame
+        }
+        let absoluteStart = max(0, min(buffer.yBase + rowStart, maxRow))
+        let absoluteEnd = max(absoluteStart, min(buffer.yBase + rowEnd, maxRow))
+        let dependencies = TerminalBidi.renderingDependencyRange(
+            rows: absoluteStart...absoluteEnd,
+            buffer: buffer,
+            maximumRows: terminal.options.maximumBidiParagraphRows)
+        let visible = buffer.yDisp...(buffer.yDisp + buffer.rows - 1)
+        if dependencies.overlaps(visible) {
+            return fullFrame
+        }
+        return nil
+    }
+    #endif
+
     func updateCursorPosition()
     {
         guard let caretView else { return }

@@ -236,6 +236,16 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// word jumps, which would otherwise leave the cursor visually stuck
     /// because `MTKView` is paused and only redraws on demand.
     var lastRenderedCursor: (x: Int, y: Int, hidden: Bool)?
+    /// State the CG scrolled-back repaint skip compares between display ticks
+    /// to detect changes the live-row update range cannot describe: displayed
+    /// buffer identity (alt/normal), full-screen semantic changes
+    /// (`fullRefreshGeneration`), and content sliding under a held viewport
+    /// (`linesTop + yDisp`). Updated on every `updateDisplay` region pass —
+    /// pinned ticks included, so an alt round-trip or generation bump consumed
+    /// while pinned still full-frames on the next scrolled-back tick.
+    var lastRepaintDisplayedAlt: Bool?
+    var lastRepaintFullRefreshGeneration: UInt64?
+    var lastRepaintScrollbackAnchor: Int?
     /// Controls how the Metal renderer builds GPU buffers each frame.
     ///
     /// The default is ``MetalBufferingMode/perRowPersistent``, which caches

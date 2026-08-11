@@ -5955,7 +5955,12 @@ open class Terminal {
         options.rows = newRows
         normalBuffer.setupTabStops (index: oldCols, tabStopWidth: tabStopWidth)
         altBuffer.setupTabStops (index: oldCols, tabStopWidth: tabStopWidth)
-        refresh (startRow: 0, endRow: self.rows - 1)
+        // Resizing reflows buffer content (column changes rewrap history), so
+        // every visible cell can change — including scrolled-back rows that a
+        // plain live-row refresh does not describe. updateFullScreen bumps
+        // fullRefreshGeneration so renderers that gate repaints on it repaint
+        // unconditionally.
+        updateFullScreen ()
     }
     
     /**
