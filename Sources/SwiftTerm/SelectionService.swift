@@ -675,7 +675,16 @@ class SelectionService: CustomDebugStringConvertible {
         let r = terminal.getDisplayText(start: min, end: max)
         return r
     }
-    
+
+    func getSelectedStyledRuns () -> [StyledTextRun] {
+        let (min, max) = if Position.compare(start, end) == .before {
+            (start, end)
+        } else {
+            (end, start)
+        }
+        return terminal.getDisplayStyledRuns(start: min, end: max)
+    }
+
     public var debugDescription: String {
         return "[Selection (active=\(active), start=\(start) end=\(end) hasSR=\(hasSelectionRange) pivot=\(pivot?.debugDescription ?? "nil")]"
     }
