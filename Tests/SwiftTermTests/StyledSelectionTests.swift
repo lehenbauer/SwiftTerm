@@ -42,8 +42,9 @@ final class StyledSelectionTests {
     @Test func testSelectedStyledRunsExposeStylesAndMidLineReset() {
         let view = makeView()
         let source = "\(esc)[1mBOLD\(esc)[22m plain \(esc)[3mITALIC\(esc)[23m \(esc)[4mUNDER\(esc)[24m \(esc)[9mSTRIKE\(esc)[29m"
+        let displayText = "BOLD plain ITALIC UNDER STRIKE"
         view.feed(text: source)
-        select(view, start: Position(col: 0, row: 0), end: Position(col: source.count, row: 0))
+        select(view, start: Position(col: 0, row: 0), end: Position(col: displayText.count, row: 0))
 
         guard let runs = view.getSelectedStyledRuns() else {
             Issue.record("expected an active selection")
@@ -94,10 +95,17 @@ final class StyledSelectionTests {
 
     @Test func testRunConcatMatchesAutowrapSelection() {
         let view = makeView(cols: 10)
-        view.feed(text: "ABCDEFGHIJKLMNO\r\nsecond")
+        view.feed(text: "\(esc)[1mABCDEFGHIJKLMNO\(esc)[22m\r\nsecond")
         select(view, start: Position(col: 0, row: 0), end: Position(col: 6, row: 2))
         expectConcatenationMatchesPlainSelection(view)
         #expect(view.getSelection() == "ABCDEFGHIJKLMNO\nsecond")
+        guard let runs = view.getSelectedStyledRuns() else {
+            Issue.record("expected an active selection")
+            return
+        }
+        let newlineRuns = runs.filter { $0.text.contains("\n") }
+        #expect(!newlineRuns.isEmpty)
+        #expect(newlineRuns.allSatisfy { $0.style == .none })
     }
 
     @Test func testRunConcatMatchesScrollbackSelection() {
@@ -128,20 +136,21 @@ final class StyledSelectionTests {
         #expect(view.getSelection() == "one\n\n\ntwo")
 
         let trailing = makeView(cols: 12)
-        trailing.feed(text: "text")
+        trailing.feed(text: "text   ")
         select(trailing, start: Position(col: 0, row: 0), end: Position(col: 10, row: 0))
         expectConcatenationMatchesPlainSelection(trailing)
-        #expect(trailing.getSelection() == "text")
+        #expect(trailing.getSelection() == "text   ")
     }
 
     @Test func testRunConcatMatchesInteriorNulAndAttributeOnlyCells() {
         let view = makeView(cols: 10)
         view.feed(text: "AXB")
         let terminal = view.getTerminal()
-        terminal.buffer.lines[0][1] = CharData.Null
+        terminal.buffer.lines[0][1] = CharData(attribute: Attribute(fg: .defaultColor, bg: .defaultInvertedColor, style: .bold))
         select(view, start: Position(col: 0, row: 0), end: Position(col: 3, row: 0))
         expectConcatenationMatchesPlainSelection(view)
         #expect(view.getSelection() == "A B")
+        #expect(view.getSelectedStyledRuns() == [StyledTextRun(text: "A B", style: .none)])
 
         let attributeOnly = makeView(cols: 10)
         attributeOnly.feed(text: "A")
