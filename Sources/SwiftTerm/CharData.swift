@@ -50,6 +50,17 @@ public struct CharacterStyle : OptionSet, Hashable {
     public static let crossedOut = CharacterStyle (rawValue: 128)
 }
 
+/// A contiguous piece of selected terminal text and the style stored by its cells.
+public struct StyledTextRun: Equatable {
+    public let text: String
+    public let style: CharacterStyle
+
+    public init (text: String, style: CharacterStyle) {
+        self.text = text
+        self.style = style
+    }
+}
+
 public enum UnderlineStyle: UInt8 {
     case none = 0
     case single = 1

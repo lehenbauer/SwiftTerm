@@ -3274,6 +3274,16 @@ extension TerminalView {
         }
         return nil
     }
+
+    /// Returns the selected text as contiguous runs carrying each cell's style,
+    /// or `nil` when there is no active selection.
+    public func getSelectedStyledRuns () -> [StyledTextRun]?
+    {
+        if selection.active {
+            return selection.getSelectedStyledRuns()
+        }
+        return nil
+    }
     
     /// Selects the entire buffer
     public func selectAll () {

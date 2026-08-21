@@ -7132,24 +7132,63 @@ open class Terminal {
 
     func getText (start: Position, end: Position, buffer: Buffer) -> String
     {
-        let lines = getSelectedLines(p1: start, p2: end, buffer: buffer)
-        if lines.count == 0 {
-            return ""
-        }
-        var r = ""
-        for line in lines {
-            r += line.toString()
-        }
-        return r
+        getStyledTextRuns(start: start, end: end, buffer: buffer).map(\.text).joined()
     }
 
-    // This version validates the input parameters
-    func getSelectedLines(p1: Position, p2: Position, buffer: Buffer) -> [Line]
+    func getDisplayStyledRuns (start: Position, end: Position) -> [StyledTextRun]
+    {
+        getStyledTextRuns(start: start, end: end, buffer: displayBuffer)
+    }
+
+    private func styledBufferLine (buffer: Buffer, line: Int, start: Int, end: Int) -> [StyledTextRun]
+    {
+        let bufferLine = buffer.lines[line]
+        var endColumn = end == -1 ? bufferLine.count : end
+        endColumn = max(start, min(endColumn, bufferLine.getTrimmedLength()))
+        let limit = max(endColumn, start)
+        var runs: [StyledTextRun] = []
+        var column = start
+
+        func append (character: Character, style: CharacterStyle) {
+            let text = character == "\u{0}" ? " " : String(character)
+            guard !text.isEmpty else {
+                return
+            }
+            if let last = runs.last, last.style == style {
+                runs[runs.count - 1] = StyledTextRun(text: last.text + text, style: style)
+            } else {
+                runs.append(StyledTextRun(text: text, style: style))
+            }
+        }
+
+        while column < limit {
+            if column > 0 && bufferLine[column].code == 0 && bufferLine[column - 1].width == 2 {
+                column += 1
+                continue
+            }
+
+            let cell = bufferLine[column]
+            let style: CharacterStyle = cell.code == 0 ? .none : cell.attribute.style
+            append(character: getCharacter(for: cell), style: style)
+
+            if cell.width == 2 {
+                let nextColumn = column + 1
+                if nextColumn < limit && bufferLine[nextColumn].code == 0 {
+                    column += 2
+                    continue
+                }
+            }
+            column += 1
+        }
+        return runs
+    }
+
+    private func getStyledTextRuns (start p1: Position, end p2: Position, buffer: Buffer) -> [StyledTextRun]
     {
         var start = p1
         var end = p2
         let b = buffer
-        
+
         switch Position.compare (start, end) {
         case .equal:
             return []
@@ -7163,113 +7202,75 @@ open class Terminal {
         if start.row < 0 || start.row > b.lines.count {
             return []
         }
-        
+
         if end.row >= b.lines.count {
-            end.row = b.lines.count-1
+            end.row = b.lines.count - 1
         }
-        return _getSelectedLines(start, end, buffer: buffer)
-    }
-    
-    func _getSelectedLines(_ start: Position, _ end: Position, buffer: Buffer) -> [Line]
-    {
-        var lines: [Line] = []
-        let buf = buffer
-        var str = ""
-        var currentLine = Line ()
-        lines.append(currentLine)
-        
-        // keep a list of blank lines that we see. if we see content after a group
-        // of blanks, add those blanks but skip all remaining / trailing blanks
-        // these will be blank lines in the selected text output
-        var blanks: [LineFragment] = []
-        
-        func addBlanks () {
-            var lastLine = -1;
-            for b in blanks {
-                if lastLine != -1 && b.line != lastLine {
-                    currentLine = Line ()
-                    lines.append(currentLine)
+
+        var result: [StyledTextRun] = []
+        var blanks: [[StyledTextRun]] = []
+
+        func append (runs: [StyledTextRun]) {
+            guard !runs.isEmpty else {
+                return
+            }
+            for run in runs {
+                if let last = result.last, last.style == run.style {
+                    result[result.count - 1] = StyledTextRun(text: last.text + run.text, style: run.style)
+                } else {
+                    result.append(run)
                 }
-                
-                lastLine = b.line
-                currentLine.add(fragment: b)
+            }
+        }
+
+        func appendBlanks () {
+            for blank in blanks {
+                append(runs: blank)
             }
             blanks = []
-        };
-        
-        // get the first line
-        var bufferLine = buf.lines [start.row]
-        if bufferLine.hasAnyContent() {
-            let str: String = translateBufferLineToString (buffer: buf, line: start.row, start: start.col, end: start.row < end.row ? -1 : end.col)
-            
-            let fragment = LineFragment (text: str, line: start.row, location: start.col, length: str.count)
-            currentLine.add (fragment: fragment)
         }
-        
-        // get the middle rows
+
+        // The first line is copied from the selection start through either its
+        // trimmed end or the selection end, just as the original text walk did.
+        var bufferLine = b.lines[start.row]
+        if bufferLine.hasAnyContent() {
+            append(runs: styledBufferLine(buffer: b, line: start.row, start: start.col, end: start.row < end.row ? -1 : end.col))
+        }
+
+        // Keep blank rows pending so trailing blanks remain absent while blank
+        // groups between two content rows retain their newlines.
         var line = start.row + 1
-        var isWrapped = false
         while line < end.row {
-            bufferLine = buffer.lines [line]
-            isWrapped = bufferLine.isWrapped
-            
-            str = translateBufferLineToString (buffer: buf, line: line, start: 0, end: -1)
-            
-            if bufferLine.hasAnyContent () {
-                // add previously gathered blank fragments
-                addBlanks ()
-                
+            bufferLine = b.lines[line]
+            let isWrapped = bufferLine.isWrapped
+            let runs = styledBufferLine(buffer: b, line: line, start: 0, end: -1)
+
+            if bufferLine.hasAnyContent() {
+                appendBlanks()
                 if !isWrapped {
-                    // this line is not a wrapped line, so the
-                    // prior line has a hard linefeed
-                    // add a fragment to that line
-                    currentLine.add (fragment: LineFragment.newLine (line: line - 1))
-                    
-                    // start a new line
-                    currentLine = Line ()
-                    lines.append(currentLine)
+                    append(runs: [StyledTextRun(text: "\n", style: .none)])
                 }
-                
-                // add the text we found to the current line
-                currentLine.add (fragment: LineFragment (text: str, line: line, location: 0, length: str.count))
+                append(runs: runs)
             } else {
-                // this line has no content, which means that it's a blank line inserted
-                // somehow, or one of the trailing blank lines after the last actual content
-                // make a note of the line
-                // check that this line is a wrapped line, if so, add a line feed fragment
                 if !isWrapped {
-                    blanks.append (LineFragment.newLine (line: line - 1))
+                    blanks.append([StyledTextRun(text: "\n", style: .none)])
                 }
-                
-                blanks.append(LineFragment (text: str, line: line, location: 0, length: str.count))
+                blanks.append(runs)
             }
-            
             line += 1
         }
-        
-        // get the last row
+
         if end.row != start.row {
-            bufferLine = buffer.lines [end.row]
-            if bufferLine.hasAnyContent () {
-                addBlanks ()
-                
-                isWrapped = bufferLine.isWrapped
-                str = translateBufferLineToString (buffer: buf, line: end.row, start: 0, end: end.col)
-                if !isWrapped {
-                    currentLine.add(fragment: LineFragment.newLine (line: line - 1))
-                    currentLine = Line ()
-                    lines.append(currentLine)
+            bufferLine = b.lines[end.row]
+            if bufferLine.hasAnyContent() {
+                appendBlanks()
+                if !bufferLine.isWrapped {
+                    append(runs: [StyledTextRun(text: "\n", style: .none)])
                 }
-                
-                currentLine.add (fragment: LineFragment (text: str, line: line, location: 0, length: str.count))
+                append(runs: styledBufferLine(buffer: b, line: end.row, start: 0, end: end.col))
             }
         }
-        return lines
-    }
-    
-    func translateBufferLineToString (buffer: Buffer, line: Int, start: Int, end: Int) -> String
-    {
-        buffer.translateBufferLineToString(lineIndex: line, trimRight: true, startCol: start, endCol: end, skipNullCellsFollowingWide: true, characterProvider: { self.getCharacter(for: $0) }).replacingOccurrences(of: "\u{0}", with: " ")
+        return result
     }
 }
 
