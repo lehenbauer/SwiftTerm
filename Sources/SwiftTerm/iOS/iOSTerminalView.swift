@@ -1650,8 +1650,15 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         }
     }
     
-    func updateScroller ()
+    func updateScroller (forcePosition: Bool = false)
     {
+        // contentSize can synchronously clamp contentOffset and invoke scroll
+        // callbacks. Keep that intermediate offset from overwriting the model,
+        // especially after prepend has shifted every existing row.
+        let wasUpdatingContentOffset = updatingContentOffsetFromTerminal
+        updatingContentOffsetFromTerminal = true
+        defer { updatingContentOffsetFromTerminal = wasUpdatingContentOffset }
+
         let displayBuffer = terminal.displayBuffer
         contentSize = CGSize (width: CGFloat (displayBuffer.cols) * cellDimension.width,
                               height: CGFloat (displayBuffer.lines.count) * cellDimension.height)
@@ -1667,7 +1674,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         // stays true through the whole momentum coast, so it cannot distinguish
         // an active drag from post-lift deceleration. contentSize is still
         // updated above so the newly appended rows remain reachable.
-        if isTracking || (userScrolling && isDecelerating) {
+        if !forcePosition && (isTracking || (userScrolling && isDecelerating)) {
             return
         }
         let rowOffset = CGFloat (displayBuffer.yDisp) * cellDimension.height
@@ -1730,9 +1737,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             return
         }
 
+        let wasUpdatingContentOffset = updatingContentOffsetFromTerminal
         updatingContentOffsetFromTerminal = true
+        defer { updatingContentOffsetFromTerminal = wasUpdatingContentOffset }
         contentOffset = newContentOffset
-        updatingContentOffsetFromTerminal = false
     }
 
     private func setManualScrolling(_ enabled: Bool) {
@@ -1762,6 +1770,16 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         }
 
         let displayBuffer = terminal.displayBuffer
+        let previousRow = displayBuffer.yDisp
+        let isManualScroll = isTracking || userScrolling
+        defer {
+            // Notify after both manual-mode flags and the fractional offset are
+            // consistent. Quiet panes need this callback to request older rows;
+            // setViewYDisp only updates the model and emits no notification.
+            if isManualScroll && displayBuffer.yDisp != previousRow {
+                terminalDelegate?.scrolled(source: self, position: scrollPosition)
+            }
+        }
         let maxRow = maxDisplayRow(in: displayBuffer)
         let maxContentOffset = maxContentOffsetY()
         let offsetY = min(max(contentOffset.y, 0), maxContentOffset)
@@ -1779,17 +1797,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             return
         }
 
-        // Freeze auto-follow only while the finger is physically down
-        // (isTracking). Excluding the momentum coast is essential: after the
-        // finger lifts, deceleration keeps firing sync while streaming output
-        // extends the content and the bottom recedes ahead of the coasting
-        // offset — treating that "not at the bottom yet" reading as a manual
-        // scroll would re-freeze a view the user just flung to the bottom. This
-        // must key off isTracking, not isDragging: on device isDragging stays
-        // true through the entire coast, so it fails to exclude momentum. It also
-        // covers layout/system-driven offset changes (startup sizing, rotation,
-        // keyboard insets, buffer shrink), which are never a manual scroll.
-        guard isTracking else {
+        // Only a finger-down gesture may ENTER manual mode. Once entered, keep
+        // yDisp current through momentum and its final offset, even if UIKit has
+        // already cleared its gesture flags. Otherwise the next output tick
+        // restores the stale finger-lift row. After reaching bottom, userScrolling
+        // is false again: output growth during the remaining coast must not
+        // re-enter manual mode. System/layout changes likewise cannot enter it.
+        guard isManualScroll else {
             return
         }
 

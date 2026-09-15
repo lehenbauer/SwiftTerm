@@ -15,9 +15,11 @@ import XCTest
 final class SelectionScrollTests: XCTestCase {
 
     private func makeTerminal (rows: Int = 10, cols: Int = 40) -> Terminal {
-        let headless = HeadlessTerminal (queue: nil) { _ in }
-        headless.terminal.resize (cols: cols, rows: rows)
-        return headless.terminal
+        // These engine tests also run on iOS, where LocalProcess/HeadlessTerminal
+        // are unavailable. Keep the same default history capacity.
+        let terminal = Terminal(delegate: TerminalTestDelegate(), options: .default)
+        terminal.resize(cols: cols, rows: rows)
+        return terminal
     }
 
     private func paintLines (_ terminal: Terminal, count: Int) {

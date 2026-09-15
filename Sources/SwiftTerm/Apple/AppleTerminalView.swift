@@ -2945,7 +2945,13 @@ extension TerminalView {
         guard insertedRows > 0 else {
             return 0
         }
+#if os(iOS) || os(visionOS)
+        // Prepend rebases every existing row. Apply that coordinate shift even
+        // during a gesture so the same content stays under the user's finger.
+        updateScroller(forcePosition: true)
+#else
         updateScroller()
+#endif
         terminalDelegate?.scrolled(source: self, position: scrollPosition)
         updateDisplay(notifyAccessibility: false)
         queuePendingDisplay()
