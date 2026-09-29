@@ -404,108 +404,155 @@ final class Upstream119ViewIntegrationTests {
     }
 #endif
 
-    // MARK: - (4) Appearance x backgroundOpacity x DECSCNM (A8)
+    // MARK: - (4) Translucent themes x Metal x DECSCNM (A8)
+    //
+    // Contract (coordinator decision): `TerminalTheme.background` is a full
+    // color including alpha, and applying a theme adopts that alpha — it does
+    // not preserve a previously set `backgroundOpacity`. Assigning an
+    // alpha-bearing `nativeBackgroundColor` is equivalent to `backgroundOpacity`,
+    // so the layer ownership rules of that API must hold for themes too.
 
     private func layerColor(_ view: TerminalView) -> RGBA? {
         RGBA(view.layer?.backgroundColor)
     }
 
-    /// CG: switching appearance must keep the host's 0.4 background opacity
-    /// on both the model color and the layer that paints the margins.
-    @Test func cgAppearanceSwitchPreservesBackgroundOpacity() throws {
-        let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 400, height: 120))
-        view.backgroundOpacity = 0.4
-        // Control: the opacity API itself works.
-        #expect(abs(view.backgroundOpacity - 0.4) < 0.01)
-        #expect(layerColor(view)?.a == 40)
-
-        view.terminalAppearance = .light
-        let light = RGBA(view.lightTheme.background)
-        #expect(RGBA(view.nativeBackgroundColor).rgb == light.rgb)
-        #expect(abs(view.backgroundOpacity - 0.4) < 0.01, "backgroundOpacity after light switch: \(view.backgroundOpacity)")
-        #expect(layerColor(view)?.rgb == light.rgb)
-        #expect(layerColor(view)?.a == 40, "CG layer after light switch: \(String(describing: layerColor(view)))")
-
-        view.terminalAppearance = .dark
-        #expect(abs(view.backgroundOpacity - 0.4) < 0.01, "backgroundOpacity after dark switch: \(view.backgroundOpacity)")
-        #expect(layerColor(view)?.a == 40, "CG layer after dark switch: \(String(describing: layerColor(view)))")
+    /// Distinct RGB per theme so a stale color can never match by accident.
+    private func theme(fg: (Int, Int, Int), bg: (Int, Int, Int), alpha: CGFloat) -> TerminalTheme {
+        func c(_ v: (Int, Int, Int), _ a: CGFloat = 1) -> NSColor {
+            NSColor(srgbRed: CGFloat(v.0) / 255, green: CGFloat(v.1) / 255, blue: CGFloat(v.2) / 255, alpha: a)
+        }
+        var t = TerminalTheme.swiftTermDark
+        t.foreground = c(fg)
+        t.background = c(bg, alpha)
+        t.caret = c(fg)
+        t.caretText = c(bg)
+        return t
     }
 
-    /// CG DECSCNM on/off at 0.4 opacity, then a theme switch while reversed.
-    @Test func cgReverseScreenAcrossThemeSwitch() throws {
+    private var translucentDark: TerminalTheme { theme(fg: (220, 210, 190), bg: (20, 30, 50), alpha: 0.2) }
+    private var translucentLight: TerminalTheme { theme(fg: (40, 20, 10), bg: (240, 230, 210), alpha: 0.4) }
+    private var opaqueLight: TerminalTheme { theme(fg: (10, 60, 10), bg: (250, 250, 235), alpha: 1) }
+
+    /// Installs both themes without applying the light one early, leaving the
+    /// view on the dark theme.
+    private func install(_ view: TerminalView, dark: TerminalTheme, light: TerminalTheme) {
+        view.lightTheme = light      // not applied: resolved appearance is dark
+        view.darkTheme = dark        // applied
+        view.terminalAppearance = .dark
+    }
+
+    /// CG: each switch adopts the chosen theme's RGB and alpha on the model
+    /// color and on the layer that paints the margins.
+    @Test func cgTranslucentThemesApplyThemeAlphaAcrossSwitches() throws {
+        let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 400, height: 120))
+        let dark = translucentDark, light = translucentLight
+        install(view, dark: dark, light: light)
+        for (name, t) in [("dark", dark), ("light", light), ("dark again", dark)] {
+            view.terminalAppearance = name.hasPrefix("dark") ? .dark : .light
+            let want = RGBA(t.background)
+            #expect(RGBA(view.nativeBackgroundColor) == want, "\(name): model \(RGBA(view.nativeBackgroundColor))")
+            #expect(abs(view.backgroundOpacity - t.background.alphaComponent) < 0.01, "\(name): opacity \(view.backgroundOpacity)")
+            #expect(layerColor(view) == want, "\(name): CG layer \(String(describing: layerColor(view)))")
+        }
+    }
+
+    /// Control protecting the existing theme-alpha API: an opaque theme
+    /// applied after `backgroundOpacity = 0.4` makes the view opaque again.
+    @Test func cgOpaqueThemeAfterTranslucentOpacityRestoresOpacityOne() throws {
         let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 400, height: 120))
         view.backgroundOpacity = 0.4
-        let darkFg = RGBA(view.nativeForegroundColor)
-        let darkBg = RGBA(view.nativeBackgroundColor)
+        #expect(layerColor(view)?.a == 40, "control: opacity API")
+        view.lightTheme = opaqueLight
+        view.terminalAppearance = .light
+        #expect(abs(view.backgroundOpacity - 1) < 0.01)
+        #expect(layerColor(view) == RGBA(opaqueLight.background))
+    }
+
+    /// CG DECSCNM with translucent themes, including a theme switch while
+    /// reversed: the swap follows the new theme, and reverse-off lands on the
+    /// new theme's background with its alpha.
+    @Test func cgReverseScreenAcrossTranslucentThemeSwitch() throws {
+        let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 400, height: 120))
+        let dark = translucentDark, light = translucentLight
+        install(view, dark: dark, light: light)
 
         view.terminal.feed(text: "\(esc)[?5h")
         #expect(view.terminal.reverseColors)
-        #expect(layerColor(view)?.rgb == darkFg.rgb, "reversed layer: \(String(describing: layerColor(view)))")
+        #expect(layerColor(view)?.rgb == RGBA(dark.foreground).rgb, "reversed layer: \(String(describing: layerColor(view)))")
         print("UPSTREAM119_CG_REVERSE_LAYER_ALPHA \(String(describing: layerColor(view)))")
-
         view.terminal.feed(text: "\(esc)[?5l")
-        #expect(layerColor(view)?.rgb == darkBg.rgb)
-        #expect(layerColor(view)?.a == 40, "control: un-reverse restores opacity")
+        #expect(layerColor(view) == RGBA(dark.background), "control: un-reverse restores theme bg + alpha")
 
         view.terminal.feed(text: "\(esc)[?5h")
         view.terminalAppearance = .light
-        let light = view.lightTheme
         #expect(RGBA(view.effectiveNativeBackgroundColor).rgb == RGBA(light.foreground).rgb)
-        #expect(RGBA(view.effectiveNativeForegroundColor).rgb == RGBA(light.background).rgb)
+        #expect(RGBA(view.effectiveNativeForegroundColor) == RGBA(light.background),
+                "reversed fg after switch: \(RGBA(view.effectiveNativeForegroundColor))")
         #expect(layerColor(view)?.rgb == RGBA(light.foreground).rgb,
                 "theme switch while reversed painted layer \(String(describing: layerColor(view)))")
 
         view.terminal.feed(text: "\(esc)[?5l")
-        #expect(layerColor(view)?.rgb == RGBA(light.background).rgb)
-        #expect(layerColor(view)?.a == 40, "after reverse off under light theme: \(String(describing: layerColor(view)))")
+        #expect(layerColor(view) == RGBA(light.background), "after reverse off: \(String(describing: layerColor(view)))")
     }
 
 #if canImport(MetalKit)
-    /// Metal owns the background through its clear color; the host layer must
-    /// stay clear (else a translucent background composites twice) across a
-    /// theme switch, and the clear color must keep the 0.4 opacity.
+    /// Real Metal renderer enabled at the default opaque background, then a
+    /// translucent theme applied: the Metal clear color carries the theme
+    /// alpha, the host layer stays clear (no double composite), and the
+    /// CAMetalLayer composites (`isOpaque == false`), exactly as assigning the
+    /// same color through `nativeBackgroundColor`/`backgroundOpacity` would.
     @Test(.enabled(if: hasMetal, "needs a Metal device"))
-    func metalAppearanceSwitchKeepsLayerClearAndOpacity() throws {
+    func metalTranslucentThemeAfterOpaqueEnable() throws {
         let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 400, height: 120))
         try view.setUseMetal(true)
         defer { try? view.setUseMetal(false) }
-        view.backgroundOpacity = 0.4
         let metalLayer = try #require(view.metalView?.layer)
-        // Control
+        // Control: default opaque state under Metal.
+        #expect(metalLayer.isOpaque == true)
         #expect(layerColor(view)?.a == 0)
-        #expect(metalLayer.isOpaque == false)
-        #expect(RGBA(view.effectiveNativeBackgroundColor).a == 40)
 
-        view.terminalAppearance = .light
-        #expect(layerColor(view)?.a == 0, "host layer under Metal after light switch: \(String(describing: layerColor(view)))")
-        #expect(RGBA(view.effectiveNativeBackgroundColor).a == 40,
-                "Metal clear color after light switch: \(RGBA(view.effectiveNativeBackgroundColor))")
-        #expect(RGBA(view.effectiveNativeBackgroundColor).rgb == RGBA(view.lightTheme.background).rgb)
-        #expect(metalLayer.isOpaque == false)
+        let dark = translucentDark, light = translucentLight
+        install(view, dark: dark, light: light)
+        for (name, t) in [("dark", dark), ("light", light)] {
+            view.terminalAppearance = name == "dark" ? .dark : .light
+            #expect(RGBA(view.effectiveNativeBackgroundColor) == RGBA(t.background),
+                    "\(name): Metal clear color \(RGBA(view.effectiveNativeBackgroundColor))")
+            #expect(layerColor(view)?.a == 0, "\(name): host layer under Metal \(String(describing: layerColor(view)))")
+            #expect(metalLayer.isOpaque == false, "\(name): CAMetalLayer.isOpaque with theme alpha \(t.background.alphaComponent)")
+        }
+
+        // Control: an opaque theme makes the Metal layer opaque again.
+        view.lightTheme = opaqueLight
+        #expect(RGBA(view.effectiveNativeBackgroundColor) == RGBA(opaqueLight.background))
+        #expect(metalLayer.isOpaque == true)
+        #expect(layerColor(view)?.a == 0, "host layer under Metal after opaque theme \(String(describing: layerColor(view)))")
     }
 
     @Test(.enabled(if: hasMetal, "needs a Metal device"))
-    func metalReverseScreenAcrossThemeSwitch() throws {
+    func metalReverseScreenAcrossTranslucentThemeSwitch() throws {
         let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 400, height: 120))
         try view.setUseMetal(true)
         defer { try? view.setUseMetal(false) }
-        view.backgroundOpacity = 0.4
-        let darkFg = RGBA(view.nativeForegroundColor)
+        let dark = translucentDark, light = translucentLight
+        install(view, dark: dark, light: light)
 
         view.terminal.feed(text: "\(esc)[?5h")
-        #expect(layerColor(view)?.a == 0, "control: DECSCNM keeps Metal host layer clear")
-        #expect(RGBA(view.effectiveNativeBackgroundColor).rgb == darkFg.rgb)
+        #expect(RGBA(view.effectiveNativeBackgroundColor).rgb == RGBA(dark.foreground).rgb)
         view.terminal.feed(text: "\(esc)[?5l")
-        #expect(layerColor(view)?.a == 0)
+        #expect(RGBA(view.effectiveNativeBackgroundColor) == RGBA(dark.background), "control: un-reverse")
 
         view.terminal.feed(text: "\(esc)[?5h")
+        // Not an isolated control: the theme install above already wrote the
+        // host layer, so this reflects install + DECSCNM.
+        #expect(layerColor(view)?.a == 0, "host layer under Metal after theme install + DECSCNM: \(String(describing: layerColor(view)))")
         view.terminalAppearance = .light
-        #expect(RGBA(view.effectiveNativeBackgroundColor).rgb == RGBA(view.lightTheme.foreground).rgb)
+        #expect(RGBA(view.effectiveNativeBackgroundColor).rgb == RGBA(light.foreground).rgb)
+        #expect(RGBA(view.effectiveNativeForegroundColor) == RGBA(light.background))
         #expect(layerColor(view)?.a == 0, "host layer under Metal after reversed theme switch: \(String(describing: layerColor(view)))")
         view.terminal.feed(text: "\(esc)[?5l")
-        #expect(layerColor(view)?.a == 0)
-        #expect(RGBA(view.effectiveNativeBackgroundColor).a == 40,
+        #expect(RGBA(view.effectiveNativeBackgroundColor) == RGBA(light.background),
                 "Metal clear color after reverse off: \(RGBA(view.effectiveNativeBackgroundColor))")
+        #expect(layerColor(view)?.a == 0)
     }
 #endif
 
