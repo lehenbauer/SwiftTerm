@@ -6811,6 +6811,8 @@ open class Terminal {
         normalBuffer.clearScrollback ()
         if buffer === normalBuffer, trimmed > 0 {
             selectionsAdjustForInPlaceScroll(top: 0, bottom: oldLineCount - 1, lines: trimmed)
+            // The viewport is now the live screen; later output must follow it.
+            userScrolling = false
         }
         refresh (startRow: 0, endRow: self.rows - 1)
     }

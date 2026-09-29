@@ -3171,6 +3171,11 @@ extension TerminalView {
     {
         search.invalidate()
         terminal.clearScrollback()
+        let displayBuffer = terminal.displayBuffer
+#if os(iOS) || os(visionOS)
+        resetManualScrollOffsetWithinRow()
+#endif
+        updateUserScrollingState(for: displayBuffer.yDisp, in: displayBuffer)
         updateScroller()
         terminalDelegate?.scrolled(source: self, position: scrollPosition)
         queuePendingDisplay()
