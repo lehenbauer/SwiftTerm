@@ -124,6 +124,40 @@ struct Upstream119BufferIntegrationTests {
         #expect(terminal.buffer.yDisp == terminal.buffer.yBase)
     }
 
+    // The follow flag is global, but the history it parked in belongs to the
+    // normal buffer. Clearing that history under the alternate screen must not
+    // leave the returning normal viewport frozen at the top.
+    @Test func clearingHistoryUnderAlternateScreenResumesFollowingAfterExit() {
+        let (terminal, _) = TerminalTestHarness.makeTerminal(cols: 16, rows: 3, scrollback: 20)
+        for i in 0..<8 { terminal.feed(text: "row \(i)\r\n") }
+        let normalLiveScreen = TerminalTestHarness.visibleLinesText(buffer: terminal.buffer, terminal: terminal)
+        terminal.setViewYDisp(1)
+        terminal.userScrolling = true
+        terminal.feed(text: "\u{1b}[?1049h\u{1b}[1;1Halt top\u{1b}[3;2Hz")
+        #expect(terminal.isCurrentBufferAlternate)
+        let selection = SelectionService(terminal: terminal)
+        selection.setSelection(start: Position(col: 0, row: 0), end: Position(col: 7, row: 0))
+        let altScreen = TerminalTestHarness.visibleLinesText(buffer: terminal.buffer, terminal: terminal)
+        let altCursor = TerminalTestHarness.cursorPosition(buffer: terminal.buffer)
+        #expect(selection.getSelectedText() == "alt top")
+
+        terminal.clearScrollback()
+        #expect(terminal.isCurrentBufferAlternate)
+        #expect(TerminalTestHarness.visibleLinesText(buffer: terminal.buffer, terminal: terminal) == altScreen)
+        #expect(TerminalTestHarness.cursorPosition(buffer: terminal.buffer) == altCursor)
+        #expect(selection.active)
+        #expect(selection.getSelectedText() == "alt top")
+        #expect(terminal.normalBuffer.yBase == 0 && terminal.normalBuffer.yDisp == 0)
+
+        terminal.feed(text: "\u{1b}[?1049l")
+        #expect(!terminal.isCurrentBufferAlternate)
+        #expect(TerminalTestHarness.visibleLinesText(buffer: terminal.buffer, terminal: terminal) == normalLiveScreen)
+        for i in 0..<5 { terminal.feed(text: "out \(i)\r\n") }
+        #expect(terminal.buffer.yBase > 0)
+        #expect(terminal.buffer.yDisp == terminal.buffer.yBase, "returned normal viewport must follow output")
+        #expect(!terminal.userScrolling)
+    }
+
     @Test func prependDoesNotImportForeignPromptGroupsOrCellTags() {
         let (terminal, _) = TerminalTestHarness.makeTerminal(cols: 16, rows: 3, scrollback: 20)
         terminal.feed(text: "live")
