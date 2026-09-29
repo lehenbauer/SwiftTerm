@@ -136,6 +136,7 @@ final class IOSLegacyKeyRepeatTests: XCTestCase {
         print("[IOSLegacyKeyRepeat] pressed released alive=\(weakView != nil) timerValid=\(weakTimer?.isValid ?? false)")
         XCTAssertEqual(recorder.sends, [Self.downArrow])
         XCTAssertNil(weakView, "pending key-repeat timer retained the view")
+        XCTAssertFalse(weakTimer?.isValid ?? false, "a released view left its repeat timer on the run loop")
         if let leaked = weakView {
             // Release the timer so a failing run does not keep firing.
             leaked.keyRepeat?.invalidate()

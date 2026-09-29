@@ -289,8 +289,7 @@ final class Upstream119ViewIntegrationTests {
         #expect(hidden.text.first == " ", "scrolled-back blink row cached in stale phase")
     }
 
-    /// Test-hook path (`setTextBlinkVisibleForTesting` duplicates the
-    /// production row loop instead of calling `invalidateTextBlinkRows`).
+    /// The test hook uses the production blink-row invalidation path.
     /// Unhosted, so the next display tick's lifecycle resets the phase to
     /// visible — that reset re-invalidates the same rows, so the band must
     /// still be repainted.

@@ -420,6 +420,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
 
     deinit {
+        keyRepeat?.invalidate()
         stopTextBlinking()
     }
 
