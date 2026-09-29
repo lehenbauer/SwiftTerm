@@ -80,7 +80,7 @@ final class SelectionTests: TerminalDelegate {
         #expect(view.calculateMouseHit(at: CGPoint(x: 0, y: 10)).grid.row == 1)
     }
 
-    @Test func testLinefeedPreservesScrolledViewportUntilInputOrBottom() {
+    @Test @MainActor func testLinefeedPreservesScrolledViewportUntilInputOrBottom() {
         let view = TerminalView(frame: CGRect(origin: .zero, size: .init(width: 120, height: 80)))
         view.resize(cols: 8, rows: 3)
         view.getTerminal().changeScrollback(50)

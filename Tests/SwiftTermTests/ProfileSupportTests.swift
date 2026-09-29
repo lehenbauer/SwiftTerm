@@ -34,6 +34,25 @@ final class CursorStyleTests {
         #expect ("\(CursorStyle.blinkBlock)" == "blinkBlock")
         #expect (CursorStyle.from (string: "\(CursorStyle.steadyBar)") == .steadyBar)
     }
+
+    private final class CursorStyleDelegate: TerminalDelegate {
+        var observedStyle: CursorStyle?
+
+        func send (source: Terminal, data: ArraySlice<UInt8>) {}
+
+        func cursorStyleChanged (source: Terminal, newStyle: CursorStyle) {
+            observedStyle = source.options.cursorStyle
+        }
+    }
+
+    @Test func callbackSeesTheNewCursorStyle () {
+        let delegate = CursorStyleDelegate()
+        let terminal = Terminal(delegate: delegate)
+
+        terminal.setCursorStyle(.steadyUnderline)
+
+        #expect(delegate.observedStyle == .steadyUnderline)
+    }
 }
 
 final class ColorParseTests {
@@ -97,6 +116,119 @@ final class ColorParseTests {
         #expect (abs (Int (bridged.red) - Int (original.red)) <= 257)
         #expect (abs (Int (bridged.green) - Int (original.green)) <= 257)
         #expect (abs (Int (bridged.blue) - Int (original.blue)) <= 257)
+    }
+}
+
+final class BellStyleTests {
+    @Test func tagNameRoundTrips () {
+        for style in BellStyle.allCases {
+            #expect (BellStyle (tagName: style.tagName) == style)
+        }
+        #expect (BellStyle (tagName: "kazoo") == nil)
+    }
+}
+
+@MainActor
+final class BellDispatchTests {
+    final class CountingDelegate: TerminalViewDelegate {
+        var bells = 0
+        func sizeChanged (source: TerminalView, newCols: Int, newRows: Int) {}
+        func setTerminalTitle (source: TerminalView, title: String) {}
+        func hostCurrentDirectoryUpdate (source: TerminalView, directory: String?) {}
+        func send (source: TerminalView, data: ArraySlice<UInt8>) {}
+        func scrolled (source: TerminalView, position: Double) {}
+        func rangeChanged (source: TerminalView, startY: Int, endY: Int) {}
+        func requestOpenLink (source: TerminalView, link: String, params: [String: String]) {}
+        func clipboardCopy (source: TerminalView, content: Data) {}
+        func bell (source: TerminalView) {
+            bells += 1
+        }
+    }
+
+    @Test func bellStyleGatesDelegate () {
+        let view = TerminalView (frame: CGRect (x: 0, y: 0, width: 400, height: 300))
+        let delegate = CountingDelegate ()
+        view.terminalDelegate = delegate
+
+        view.bellStyle = .sound
+        view.bell (source: view.getTerminal ())
+        #expect (delegate.bells == 1)
+
+        view.bellStyle = .none
+        view.bell (source: view.getTerminal ())
+        #expect (delegate.bells == 1)
+
+        view.bellStyle = .visual
+        view.bell (source: view.getTerminal ())
+        #expect (delegate.bells == 1)
+
+        view.bellStyle = .soundAndVisual
+        view.bell (source: view.getTerminal ())
+        #expect (delegate.bells == 2)
+    }
+}
+
+final class ClearScrollbackTests {
+    class DummyDelegate: TerminalDelegate {
+        func send (source: Terminal, data: ArraySlice<UInt8>) {}
+    }
+
+    @Test func clearScrollbackDropsHistoryKeepsScreen () {
+        let terminal = Terminal (delegate: DummyDelegate (),
+                                 options: TerminalOptions (cols: 20, rows: 5, scrollback: 100))
+        for i in 0..<30 {
+            terminal.feed (text: "line \(i)\r\n")
+        }
+        let buffer = terminal.buffer
+        #expect (buffer.yBase > 0)
+        let visibleBefore = terminal.getText (
+            start: Position (col: 0, row: buffer.yBase),
+            end: Position (col: 19, row: buffer.yBase))
+
+        terminal.clearScrollback ()
+        #expect (buffer.yBase == 0)
+        #expect (buffer.yDisp == 0)
+        let visibleAfter = terminal.getText (
+            start: Position (col: 0, row: 0),
+            end: Position (col: 19, row: 0))
+        #expect (visibleAfter == visibleBefore)
+    }
+
+    @Test func clearScrollbackOnEmptyBufferIsANoop () {
+        let terminal = Terminal (delegate: DummyDelegate (),
+                                 options: TerminalOptions (cols: 20, rows: 5, scrollback: 100))
+        terminal.feed (text: "hello")
+        terminal.clearScrollback ()
+        #expect (terminal.buffer.yBase == 0)
+        let text = terminal.getText (start: Position (col: 0, row: 0),
+                                     end: Position (col: 5, row: 0))
+        #expect (text == "hello")
+    }
+}
+
+@MainActor
+final class BackgroundOpacityTests {
+    @Test func opacityIsClampedAndCarriedInAlpha () {
+        let view = TerminalView (frame: CGRect (x: 0, y: 0, width: 400, height: 300))
+        #expect (view.backgroundOpacity == 1.0)
+
+        view.nativeBackgroundColor = NSColor (srgbRed: 0.1, green: 0.2, blue: 0.3, alpha: 1)
+        view.backgroundOpacity = 0.5
+        #expect (abs (view.backgroundOpacity - 0.5) < 0.001)
+        #expect (abs (view.nativeBackgroundColor.alphaComponent - 0.5) < 0.001)
+        // The base color is preserved
+        #expect (abs (view.nativeBackgroundColor.redComponent - 0.1) < 0.01)
+
+        view.backgroundOpacity = 3.0
+        #expect (view.backgroundOpacity == 1.0)
+        view.backgroundOpacity = -1.0
+        #expect (view.backgroundOpacity == 0.0)
+    }
+
+    @Test func alphaBearingBackgroundReadsAsOpacity () {
+        let view = TerminalView (frame: CGRect (x: 0, y: 0, width: 400, height: 300))
+        view.nativeBackgroundColor = NSColor (srgbRed: 0, green: 0, blue: 0, alpha: 0.85)
+        #expect (abs (view.backgroundOpacity - 0.85) < 0.001)
     }
 }
 

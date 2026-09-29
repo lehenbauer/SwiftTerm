@@ -204,6 +204,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         }
         set {
             caretView?.tracksFocus = newValue
+#if canImport(MetalKit)
+            queueMetalDisplay()
+#endif
         }
     }
     var accessibility: AccessibilityService = AccessibilityService()
@@ -213,6 +216,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     var lineInfoCache: [Int: LineInfoCacheEntry] = [:]
     var lineInfoCacheGeneration: UInt64 = 0
     var lineInfoInvalidationGenerations: [ObjectIdentifier: UInt64] = [:]
+    var textBlinkVisible = true
+    var textBlinkTimer: Timer?
+    var textBlinkObservers: [(NotificationCenter, NSObjectProtocol)] = []
+    var textBlinkApplicationActive = true
+    var cursorColorIsDefault = true
+    var cursorTextColorIsDefault = true
+    var reverseColorsSavedLayerBackground: CGColor?
     /// Output received shortly after local input is likely echo or prompt redraw;
     /// render it without the 16.67ms frame-rate throttle so typing feels responsive.
     var lastUserInputUptimeNs: UInt64 = 0
@@ -256,7 +266,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     private var progressReportTimer: Timer?
     private var lastProgressValue: UInt8?
     
-    var selection: SelectionService!
+    /// Tracks the selection state of the terminal, and can be used to set it
+    /// programmatically (see `SelectionService`).
+    public var selection: SelectionService!
     var attrStrBuffer: CircularList<ViewLineInfo>!
     var images:[(image: TerminalImage, col: Int, row: Int)] = []
 
@@ -398,7 +410,17 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         setupGestures ()
         setupLinkReportingInteractions()
         setupAccessoryView ()
+        setupTextBlinking()
         didFinishSetup = true
+    }
+
+    open override func didMoveToWindow() {
+        super.didMoveToWindow()
+        updateTextBlinkLifecycle()
+    }
+
+    deinit {
+        stopTextBlinking()
     }
 
 #if canImport(MetalKit)
@@ -457,6 +479,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             // displays.
             if let metalLayer = mtkView.layer as? CAMetalLayer {
                 metalLayer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
+                // Composite through the layer when the background is translucent
+                metalLayer.isOpaque = backgroundOpacity >= 1.0
             }
             let renderer = try MetalTerminalRenderer(view: mtkView, terminalView: self)
             mtkView.delegate = renderer
@@ -571,6 +595,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     
     public func updateUiClosed() {
         self.link.invalidate()
+        stopTextBlinking()
     }
     
     @objc open override func paste (_ sender: Any?) {
@@ -810,6 +835,16 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         gestureRecognizer.modifierFlags.contains(.shift) && !terminal.mouseShiftCapture
     }
 
+    private func semanticPromptModifiers(for gestureRecognizer: UIGestureRecognizer) -> SemanticPromptClickModifiers {
+        var result: SemanticPromptClickModifiers = []
+        let flags = gestureRecognizer.modifierFlags
+        if flags.contains(.shift) { result.insert(.shift) }
+        if flags.contains(.control) { result.insert(.control) }
+        if flags.contains(.alternate) { result.insert(.option) }
+        if flags.contains(.command) { result.insert(.command) }
+        return result
+    }
+
     @objc func singleTap (_ gestureRecognizer: UITapGestureRecognizer)
     {
         if isFirstResponder {
@@ -832,6 +867,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                     sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: true)
                 }
             } else {
+                // R6: capture the gesture state before any handler mutates it.
+                let snapshot = SemanticPromptPointerSnapshot(
+                    selectionWasActive: selection.active,
+                    didDrag: false,
+                    clickCount: 1,
+                    pressWasSemanticEligible: true)
                 if selection.active {
                     selection.selectNone()
                     disableSelectionPanGesture()
@@ -842,9 +883,17 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                     let location = gestureRecognizer.location(in: gestureRecognizer.view)
                     let tapLoc = calculateTapHit(gesture: gestureRecognizer).grid
                     let displayBuffer = terminal.displayBuffer
-                    let cursorRow = displayBuffer.y + displayBuffer.yDisp
+                    // The cursor lives at yBase; yDisp is only where the user
+                    // scrolled the viewport.
+                    let cursorRow = displayBuffer.y + displayBuffer.yBase
                     if abs (tapLoc.col-displayBuffer.x) < 4 && abs (tapLoc.row - cursorRow) < 2 {
                         showContextMenu (forRegion: makeContextMenuRegionForTap (point: location), pos: tapLoc)
+                    } else {
+                        _ = terminal.handleSemanticPromptClick(
+                            at: tapHit,
+                            modifiers: semanticPromptModifiers(for: gestureRecognizer),
+                            snapshot: snapshot
+                        )
                     }
                 }
             }
@@ -1361,14 +1410,20 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     /// Controls the color for the caret
     public var caretColor: UIColor {
         get { caretView?.caretColor ?? UIColor.black }
-        set { caretView?.caretColor = newValue }
+        set {
+            cursorColorIsDefault = false
+            caretView?.caretColor = newValue
+        }
     }
     
     /// Controls the color for the text in the caret when using a block cursor, if not set
     /// the cursor will render with the foreground color
     public var caretTextColor: UIColor? {
         get { caretView?.caretTextColor }
-        set { caretView?.caretTextColor = newValue }
+        set {
+            cursorTextColorIsDefault = newValue == nil
+            caretView?.caretTextColor = newValue
+        }
     }
     
     /// Controls weather to use high ansi colors, if false terminal will use bold text instead of high ansi colors
@@ -1872,7 +1927,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         // Without these two lines, on font changes, some junk is being displayed
         // Once we test the font change, we could disable these two lines, and
         // enable the #if false in drawterminalContents that should be coping with this now
-        nativeBackgroundColor.set ()
+        effectiveNativeBackgroundColor.set ()
         context.fill ([dirtyRect])
 
         // drawTerminalContents and CoreText expect the AppKit coordinate system
@@ -2118,6 +2173,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     private func kittyEncoder() -> KittyKeyboardEncoder {
         KittyKeyboardEncoder(flags: terminal.keyboardEnhancementFlags,
                              applicationCursor: terminal.applicationCursor,
+                             applicationKeypad: terminal.applicationKeypad,
                              backspaceSendsControlH: backspaceSendsControlH)
     }
 
@@ -2742,6 +2798,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         if response {
             caretView?.updateCursorStyle()
             terminal.setTerminalFocus(true)
+#if canImport(MetalKit)
+            queueMetalDisplay()
+#endif
         }
         return response
     }
@@ -2751,8 +2810,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         
         if code {
             terminal.setTerminalFocus(false)
-            caretView?.disableAnimations()
-            caretView?.updateView()
+            caretView?.updateCursorStyle()
+#if canImport(MetalKit)
+            queueMetalDisplay()
+#endif
             keyRepeat?.invalidate()
             keyRepeat = nil
             
@@ -2839,6 +2900,56 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 commandActive = true
             }
             uitiLog("pressesBegan keyCode:\(key.keyCode) chars:\(key.characters.debugDescription) ignoring:\(key.charactersIgnoringModifiers.debugDescription) modifiers:\(key.modifierFlags)")
+            if kittyFlags.isEmpty,
+               key.modifierFlags.contains(.command),
+               !(key.modifierFlags.contains(.alternate) && key.charactersIgnoringModifiers == "o") {
+                continue
+            }
+            if kittyFlags.isEmpty,
+               !key.modifierFlags.contains(.command),
+               (!key.modifierFlags.contains(.alternate) || optionAsMetaKey),
+               let functionKey = kittyFunctionalKey(for: key.keyCode),
+               !isKittyModifierKey(functionKey) {
+                let modifiers = kittyModifiers(from: key, includeOption: optionAsMetaKey)
+                let isUnmodifiedPageKey = (functionKey == .pageUp || functionKey == .pageDown)
+                    && modifiers.intersection([.shift, .alt, .ctrl]).isEmpty
+                    && !terminal.applicationCursor
+                if isUnmodifiedPageKey {
+                    if functionKey == .pageUp {
+                        pageUp()
+                    } else {
+                        pageDown()
+                    }
+                    didHandleEvent = true
+                    continue
+                }
+                let functionKeyText = kittyTextForFunctionalKey(functionKey, uiKey: key)
+                let pressEvent = KittyKeyEvent(key: .functional(functionKey),
+                                               modifiers: modifiers,
+                                               eventType: .press,
+                                               text: functionKeyText,
+                                               shiftedKey: nil,
+                                               baseLayoutKey: nil,
+                                               composing: kittyIsComposing)
+                if sendKittyEvent(pressEvent) {
+                    didHandleEvent = true
+                    keyRepeat?.invalidate()
+                    keyRepeat = Timer(fire: Date(timeInterval: 0.4, since: Date()),
+                                      interval: 0.1,
+                                      repeats: true) { _ in
+                        let repeatEvent = KittyKeyEvent(key: .functional(functionKey),
+                                                        modifiers: modifiers,
+                                                        eventType: .repeatPress,
+                                                        text: functionKeyText,
+                                                        shiftedKey: nil,
+                                                        baseLayoutKey: nil,
+                                                        composing: self.kittyIsComposing)
+                        _ = self.sendKittyEvent(repeatEvent)
+                    }
+                    RunLoop.current.add(keyRepeat!, forMode: .default)
+                }
+                continue
+            }
             if !kittyFlags.isEmpty {
                 if key.modifierFlags.contains([.alternate, .command]) && key.charactersIgnoringModifiers == "o" {
                     optionAsMetaKey.toggle()
@@ -3179,8 +3290,63 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         caretView?.style = newStyle
         updateCaretView()
     }
+    /**
+     * Opacity of the terminal's default background, in the 0...1 range (values are clamped).
+     *
+     * On iOS the default background is painted by the view's layer, so the
+     * opacity is carried in the alpha of `layer.backgroundColor`; the view
+     * behind the terminal shows through when the value is below 1.
+     */
+    public var backgroundOpacity: CGFloat {
+        get {
+            return layer.backgroundColor?.alpha ?? 1.0
+        }
+        set {
+            let clamped = max (0.0, min (1.0, newValue))
+            if let background = layer.backgroundColor {
+                layer.backgroundColor = background.copy (alpha: clamped)
+            }
+            colorsChanged ()
+        }
+    }
+
+    /// Controls how this view responds to the bell character; `.sound`
+    /// preserves the historical behavior of invoking the delegate's `bell`
+    public var bellStyle: BellStyle = .sound
+
     open func bell(source: Terminal) {
-        terminalDelegate?.bell (source: self)
+        switch bellStyle {
+        case .none:
+            break
+        case .sound:
+            terminalDelegate?.bell (source: self)
+        case .visual:
+            flashVisualBell ()
+        case .soundAndVisual:
+            terminalDelegate?.bell (source: self)
+            flashVisualBell ()
+        }
+    }
+
+    /// Briefly flashes the view with the foreground color, the "visual bell"
+    func flashVisualBell ()
+    {
+        let flash = CALayer ()
+        flash.frame = bounds
+        flash.backgroundColor = nativeForegroundColor.cgColor
+        flash.opacity = 0
+        layer.addSublayer (flash)
+
+        CATransaction.begin ()
+        CATransaction.setCompletionBlock {
+            flash.removeFromSuperlayer ()
+        }
+        let animation = CAKeyframeAnimation (keyPath: "opacity")
+        animation.values = [0.0, 0.35, 0.0]
+        animation.keyTimes = [0, 0.3, 1]
+        animation.duration = 0.2
+        flash.add (animation, forKey: "visualBell")
+        CATransaction.commit ()
     }
 
     public func progressReport(source: Terminal, report: Terminal.ProgressReport) {

@@ -536,7 +536,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             os_signpost(.end, log: MetalTerminalRenderer.profileLog, name: "Metal.BuildDrawData", signpostID: buildID)
         }
 #endif
-        let bgColor = colorToSIMD(terminalView.nativeBackgroundColor)
+        let bgColor = colorToSIMD(terminalView.effectiveNativeBackgroundColor)
         passDescriptor.colorAttachments[0].clearColor = MTLClearColorMake(Double(bgColor.x),
                                                                          Double(bgColor.y),
                                                                          Double(bgColor.z),
@@ -1610,27 +1610,16 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                 } else if runAttributes.keys.contains(.backgroundColor) {
                     backgroundColor = runAttributes[.backgroundColor] as? TTColor
                 }
-                    if let backgroundColor = backgroundColor {
+                    // Runs carrying the default background emit no quad: the
+                    // pass's clear color already paints it (including the
+                    // margins), and a quad on top would double-composite when
+                    // the background is translucent (backgroundOpacity < 1)
+                    if let backgroundColor = backgroundColor, backgroundColor != terminalView.effectiveNativeBackgroundColor {
                         let columnSpan = max(0, endColumn - startColumn)
                         if columnSpan > 0 {
                             let x0 = lineOriginPx.x + (CGFloat(startColumn) * cellWidthPx)
                             let y0 = lineOriginPx.y
-                            var x1 = lineOriginPx.x + (CGFloat(startColumn + columnSpan) * cellWidthPx)
-                            if endColumn >= buffer.cols {
-                                if backgroundColor == terminalView.nativeBackgroundColor {
-                                    x1 = lineOriginPx.x + viewWidthPx
-                                } else {
-                                    let marginX0 = x1
-                                    let marginX1 = lineOriginPx.x + viewWidthPx
-                                    if marginX1 > marginX0 {
-                                        let (mx0, my0, mx1, my1) = transformRect(x0: marginX0, y0: y0, x1: marginX1, y1: lineOriginPx.y + cellHeightPx)
-                                        if let mClipped = self.clipRect(mx0, my0, mx1, my1, clipRect) {
-                                            let defaultBg = colorToSIMD(terminalView.nativeBackgroundColor)
-                                            backgroundCells.append(makeColorCell(x0: mClipped.0, y0: mClipped.1, x1: mClipped.2, y1: mClipped.3, color: defaultBg))
-                                        }
-                                    }
-                                }
-                            }
+                            let x1 = lineOriginPx.x + (CGFloat(startColumn + columnSpan) * cellWidthPx)
                             let y1 = lineOriginPx.y + cellHeightPx
                             let (tx0, ty0, tx1, ty1) = transformRect(x0: x0, y0: y0, x1: x1, y1: y1)
                             if let clipped = self.clipRect(tx0, ty0, tx1, ty1, clipRect) {
@@ -1748,7 +1737,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                 let runFont = runAttributes[.font] as? TTFont ?? terminalView.fontSet.normal
                 let ctFont = runFont as CTFont
 
-                let textColor = runAttributes[.foregroundColor] as? TTColor ?? terminalView.nativeForegroundColor
+                let textColor = runAttributes[.foregroundColor] as? TTColor ?? terminalView.effectiveNativeForegroundColor
                 let textColorSIMD = colorToSIMD(textColor)
 
                 // Same-cell glyphs (base + combining marks) are adjacent in
@@ -1829,7 +1818,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                 if let rawStyle = runAttributes[.underlineStyle] as? Int,
                    rawStyle != 0 {
                     let underlineStyle = resolveUnderlineStyle(runAttributes)
-                    let underlineColor = (runAttributes[.underlineColor] as? TTColor) ?? terminalView.nativeForegroundColor
+                    let underlineColor = (runAttributes[.underlineColor] as? TTColor) ?? terminalView.effectiveNativeForegroundColor
                     let underlineColorSIMD = colorToSIMD(underlineColor)
                     let thickness = underlineThickness * scale
                     let segmentStyle: UnderlineStyle = underlineStyle == .double ? .single : underlineStyle
@@ -1874,7 +1863,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                 if let rawStyle = runAttributes[.strikethroughStyle] as? Int,
                    rawStyle != 0 {
                     let style = NSUnderlineStyle(rawValue: rawStyle)
-                    let strikeColor = (runAttributes[.strikethroughColor] as? TTColor) ?? terminalView.nativeForegroundColor
+                    let strikeColor = (runAttributes[.strikethroughColor] as? TTColor) ?? terminalView.effectiveNativeForegroundColor
                     let strikeColorSIMD = colorToSIMD(strikeColor)
                     let strikeStyle: UnderlineStyle
                     if style.contains(.patternDot) {
@@ -2919,7 +2908,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         let y0 = lineOriginPx.y
         let x1 = x0 + cellWidthPx * doublePosition * cursorColumnWidth
         let y1 = y0 + cellHeightPx
-        let cursorColor = colorToSIMD(terminalView.caretColor)
+
+        let cursorColor = colorToSIMD(terminalView.effectiveCaretColor)
         let cursorClip = ClipRect(minX: Float(x0), minY: Float(y0), maxX: Float(x1), maxY: Float(y1))
         var colorVertices: [ColorVertex] = []
         var glyphVerticesGray: [GlyphVertex] = []
@@ -2976,7 +2966,10 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         }
 
         let charData = buffer.lines[cursorRow][buffer.x]
-        let caretTextColor = terminalView.caretTextColor ?? terminalView.nativeForegroundColor
+        let caretTextColor = terminalView.effectiveCaretTextColor
+        if !terminalView.textBlinkVisible && charData.attribute.style.contains(.blink) {
+            return (colorVertices, [], [])
+        }
         if PowerlineRenderer.shouldRender(codePoint: UInt32(charData.code),
                                           customGlyphsEnabled: terminalView.customBlockGlyphs) {
             let cursorCellWidthPx = max(1, Int(round(cellWidthPx * doublePosition * cursorColumnWidth)))
@@ -3012,7 +3005,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             return (colorVertices, glyphVerticesGray, glyphVerticesColor)
         }
         let attributes = terminalView.getAttributedValue(charData.attribute,
-                                                         usingFg: terminalView.caretColor,
+                                                         usingFg: terminalView.effectiveCaretColor,
                                                          andBg: caretTextColor) ?? [.font: terminalView.fontSet.normal]
         let attributedString = NSAttributedString(string: UnicodeUtil.textPresentationAdjusted(charData.getCharacter()), attributes: attributes)
         let ctline = CTLineCreateWithAttributedString(attributedString)

@@ -447,7 +447,12 @@ public class EscapeSequenceParser {
         case 0x6d: terminal.cmdCsiM(pars, collect)              // m
         case 0x6e: terminal.cmdDeviceStatus(pars, collect)      // n
         case 0x70: terminal.csiPHandler(pars, collect)          // p
-        case 0x71: terminal.cmdSetCursorStyle(pars, collect)    // q
+        case 0x71:                                              // q
+            if collect == [UInt8(ascii: ">")] {
+                terminal.cmdXTVERSION(pars, collect)
+            } else {
+                terminal.cmdSetCursorStyle(pars, collect)
+            }
         case 0x72:                                              // r
             if collect == [UInt8(ascii: "?")] {
                 terminal.cmdRestorePrivateModes(pars)
@@ -580,6 +585,7 @@ public class EscapeSequenceParser {
         case 52:   terminal.oscClipboard(data)
         case 104:  terminal.oscResetColor(data)
         case 112:  terminal.tdel?.setCursorColor(source: terminal, color: nil)
+        case 133:  terminal.oscSemanticPrompt(data)
         case 777:  terminal.oscNotification(data)
         case 1337: terminal.osciTerm2(data)
         default:
