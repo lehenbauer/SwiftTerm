@@ -6804,8 +6804,14 @@ open class Terminal {
     /// configured scrollback capacity
     public func clearScrollback ()
     {
-        // Only the normal buffer has scrollback
+        // Only the normal buffer has scrollback. Selections use buffer-row
+        // indices, so surviving selections must follow the retained lines.
+        let trimmed = normalBuffer.yBase
+        let oldLineCount = normalBuffer.lines.count
         normalBuffer.clearScrollback ()
+        if buffer === normalBuffer, trimmed > 0 {
+            selectionsAdjustForInPlaceScroll(top: 0, bottom: oldLineCount - 1, lines: trimmed)
+        }
         refresh (startRow: 0, endRow: self.rows - 1)
     }
 
@@ -6915,13 +6921,16 @@ open class Terminal {
 
     private func remapCapturedLine(_ sourceLine: BufferLine, from sourceTerminal: Terminal) -> BufferLine {
         let line = BufferLine(from: sourceLine)
+        // Captures supply text and rendition, not live prompt state. Group
+        // identities belong to the scratch parser and cannot enter this buffer.
+        line.destroySemanticState()
         for column in 0..<line.count {
             var charData = line[column]
-            guard charData.code >= Int32(CharData.maxRune),
-                  let character = sourceTerminal.indexToCharMap[charData.code] else {
-                continue
+            charData.setSemanticContent(.none)
+            if charData.code >= Int32(CharData.maxRune),
+               let character = sourceTerminal.indexToCharMap[charData.code] {
+                charData.setValue(code: code(for: character), size: Int32(charData.width))
             }
-            charData.setValue(code: code(for: character), size: Int32(charData.width))
             line[column] = charData
         }
         return line

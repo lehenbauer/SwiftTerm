@@ -910,6 +910,7 @@ public final class Buffer {
         }
         let amountToTrim = yBase
         lines.trimStart (count: amountToTrim)
+        linesTop += amountToTrim
         yBase = 0
         yDisp = 0
         savedY = max (savedY - amountToTrim, 0)

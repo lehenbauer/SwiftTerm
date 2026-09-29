@@ -3171,6 +3171,7 @@ extension TerminalView {
      */
     public func clearScrollback ()
     {
+        search.invalidate()
         terminal.clearScrollback()
         updateScroller()
         terminalDelegate?.scrolled(source: self, position: scrollPosition)
