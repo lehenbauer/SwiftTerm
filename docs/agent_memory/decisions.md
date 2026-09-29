@@ -1,5 +1,13 @@
 # Decisions
 
+## 2026-09-29
+
+- Adopt only released upstream SwiftTerm tags into the fork; do not pull unreleased upstream `main` work (e.g. Ghostty-derived IO/SIMD) into a release integration to chase throughput — `handoffs/2026-09-29-upstream-v1.19.0.md`.
+- Never re-pin Whisp to a v1.19-based SwiftTerm without Whisp's OSC 133 mirror override (ai-whisperer `77b1d871` or equivalent) in the same change; without it, built-in OSC 133 A/N/L handling makes tmux mirrors diverge from tmux's grid.
+- Do not read RenderBench feed ticks/s as rendering latency or presented frames: the v1.19 Metal `arabic-line` ~39% tick drop is feed cost plus more successful draw builds, and the 2026-08-08 3–4% BiDi acceptance does not cover it.
+- Keep v1.19 `clearScrollback` preserving absolute row identities, the screen-relative saved cursor, image counts and output-follow state (including the global follow flag when cleared under the alternate screen), and never import OSC 133 marks, groups or cell tags from captured history.
+- Do not drop `owningBuffer` assignment in `Buffer.onLineAttached` to recover feed cost: it measured −2.6%/−4.1% p50 but is required for OSC 133 cross-buffer behavior.
+
 ## 2026-08-11
 
 - While scrolled back, the CG renderer only repaints on explicit signals
