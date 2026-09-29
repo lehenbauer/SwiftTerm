@@ -2934,10 +2934,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                                                composing: kittyIsComposing)
                 if sendKittyEvent(pressEvent) {
                     didHandleEvent = true
-                    keyRepeat?.invalidate()
-                    keyRepeat = Timer(fire: Date(timeInterval: 0.4, since: Date()),
-                                      interval: 0.1,
-                                      repeats: true) { _ in
+                    startKeyRepeat { [weak self] in
+                        guard let self else { return }
                         let repeatEvent = KittyKeyEvent(key: .functional(functionKey),
                                                         modifiers: modifiers,
                                                         eventType: .repeatPress,
@@ -2947,7 +2945,6 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                                                         composing: self.kittyIsComposing)
                         _ = self.sendKittyEvent(repeatEvent)
                     }
-                    RunLoop.current.add(keyRepeat!, forMode: .default)
                 }
                 continue
             }
