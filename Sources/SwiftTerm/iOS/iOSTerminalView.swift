@@ -1400,7 +1400,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     /// bold glyphs paint with this color instead of `nativeForegroundColor`,
     /// giving hosts a way to brighten bold text without changing regular
     /// text (matches iTerm2's "bold color" profile behavior). When nil, bold
-    /// default-fg text uses `nativeForegroundColor` as before.
+    /// default-fg text uses `nativeForegroundColor` as before. DEC reverse-screen
+    /// mode uses the swapped default color instead of this bold override.
     public var nativeBoldForegroundColor: UIColor? {
         didSet {
             colorsChanged()

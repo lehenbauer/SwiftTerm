@@ -763,6 +763,9 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             // Metal renders, its clear color owns the background instead
             layer?.backgroundColor = metalView == nil
                 ? effectiveNativeBackgroundColor.cgColor : NSColor.clear.cgColor
+            // Alpha-bearing color assignments (including themes) are equivalent
+            // to backgroundOpacity and need Metal composition as well.
+            metalView?.layer?.isOpaque = newValue.cgColor.alpha >= 1.0
             settingBg = false
         }
     }
@@ -772,7 +775,8 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// bold glyphs paint with this color instead of `nativeForegroundColor`,
     /// giving hosts a way to brighten bold text without changing regular
     /// text (matches iTerm2's "bold color" profile behavior). When nil, bold
-    /// default-fg text uses `nativeForegroundColor` as before.
+    /// default-fg text uses `nativeForegroundColor` as before. DEC reverse-screen
+    /// mode uses the swapped default color instead of this bold override.
     public var nativeBoldForegroundColor: NSColor? {
         didSet {
             colorsChanged()
@@ -800,8 +804,6 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         set {
             let clamped = max (0.0, min (1.0, newValue))
             nativeBackgroundColor = _nativeBg.withAlphaComponent (clamped)
-            // CAMetalLayer defaults to opaque; it must composite when translucent
-            metalView?.layer?.isOpaque = clamped >= 1.0
             colorsChanged ()
         }
     }

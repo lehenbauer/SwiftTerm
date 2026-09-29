@@ -144,14 +144,20 @@ extension TerminalView {
     func applyResolvedAppearance() {
         let theme = resolvedIsDarkAppearance() ? darkTheme : lightTheme
 
+        #if !os(macOS)
+        // UIKit keeps the default background on the layer. Replace the saved
+        // normal color too, so leaving DECSCNM restores this theme, not the old one.
+        layer.backgroundColor = theme.background.cgColor
+        if terminal.reverseColors {
+            reverseColorsSavedLayerBackground = theme.background.cgColor
+        }
+        #endif
         nativeForegroundColor = theme.foreground
         #if os(macOS)
+        // The setter owns the CG layer / transparent host layer under Metal.
         nativeBackgroundColor = theme.background
-        layer?.backgroundColor = theme.background.cgColor
         #else
-        // Mirror the init-time transparency dance: actual bg lives on the
-        // layer; cell-level default bg is transparent so it doesn't paint over.
-        layer.backgroundColor = theme.background.cgColor
+        // Cell-level default bg stays transparent so it doesn't paint over the layer.
         nativeBackgroundColor = TTColor.clear
         #endif
 
