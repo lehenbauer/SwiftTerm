@@ -256,7 +256,7 @@ final class Upstream119ViewIntegrationTests {
         let buffer = view.terminal.buffer
         #expect(buffer.yBase - buffer.yDisp >= view.terminal.rows)
         #expect(view.visibleBlinkRows() == [buffer.yDisp + screenRow])
-        view.invalidateLinkHighlightRow(buffer.yDisp + screenRow)
+        view.invalidateAppearanceRow(buffer.yDisp + screenRow)
         let band = rowBand(view, screenRow: screenRow)
         #expect(view.invalidated.contains { $0.minY <= band.bottom && $0.maxY >= band.top })
     }

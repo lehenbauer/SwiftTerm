@@ -883,16 +883,12 @@ extension TerminalView {
         textBlinkTimer?.invalidate()
         textBlinkTimer = nil
         textBlinkVisible = visible
-        let buffer = terminal.displayBuffer
-        for row in visibleBlinkRows() {
-            terminal.updateRange(borrowing: buffer, row - buffer.yDisp)
-        }
+        invalidateTextBlinkRows(visibleBlinkRows())
     }
 
     private func invalidateTextBlinkRows(_ absoluteRows: [Int]) {
-        let buffer = terminal.displayBuffer
         for row in absoluteRows {
-            terminal.updateRange(borrowing: buffer, row - buffer.yDisp)
+            invalidateAppearanceRow(row)
         }
         queuePendingDisplay()
     }
@@ -1533,11 +1529,13 @@ extension TerminalView {
         let oldRows = Set(oldRange?.map(\.row) ?? [])
         let newRows = Set(newRange?.map(\.row) ?? [])
         for row in oldRows.union(newRows) {
-            invalidateLinkHighlightRow(row)
+            invalidateAppearanceRow(row)
         }
     }
 
-    func invalidateLinkHighlightRow(_ bufferRow: Int)
+    // Attribute-only changes (links and blink phase) must invalidate both the
+    // cached row rendition and the actual viewport row, even in scrollback.
+    func invalidateAppearanceRow(_ bufferRow: Int)
     {
         let displayBuffer = terminal.displayBuffer
         invalidateLineInfoCache(row: bufferRow)

@@ -220,7 +220,7 @@ struct ScrollbackRepaintTests {
         let (view, terminal) = makeDeepScrolledBackView()
         let cellHeight = view.cellDimension.height
         let screenRow = 2
-        view.invalidateLinkHighlightRow(terminal.buffer.yDisp + screenRow)
+        view.invalidateAppearanceRow(terminal.buffer.yDisp + screenRow)
         // The CG path invalidates the viewport row directly (extended one cell
         // down) and must not route through the live-space update range.
         #expect(terminal.getUpdateRange() == nil)
