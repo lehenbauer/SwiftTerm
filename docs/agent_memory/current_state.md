@@ -5,13 +5,13 @@ Bounded snapshot of what is true now. History and narrative live in
 
 ## Branches and pins
 
-- Local `main` was fast-forwarded to v1.19.0 source `85cb8ca` (reflog 2026-09-29) and the `origin/main` tracking ref showed `85cb8ca`; coordinator verification of publication is pending. Prior `main` was `2747875`.
-- Upstream v1.19.0 adoption is selected and user-authorized (tested source `85cb8ca`); the docs-only commits recording it live on `integrate/upstream-v1.19.0` (worktree `../SwiftTerm-v119-integration`) until merged; Whisp re-pin and live verification are pending with the coordinator — `handoffs/2026-09-29-upstream-v1.19.0-adoption.md`.
-- Whisp's committed pin was `2747875` when last checked (ai-whisperer `0a70523b`); no v1.19 re-pin was known at this closeout. Confirm in `../ai-whisperer` before relying on this.
+- `main` and `origin/main` are v1.19.0 source `85cb8ca` (push verified by coordinator via `git ls-remote`, 2026-09-29); prior `main` was `2747875`.
+- Upstream v1.19.0 is adopted and published; its docs-only commits live on `integrate/upstream-v1.19.0` (worktree `../SwiftTerm-v119-integration`) until landed. Durable Whisp pin (with `77b1d871`) is authorized and pending; Whisp app runtime and human visual acceptance are unclaimed — `handoffs/2026-09-29-upstream-v1.19.0-adoption.md`.
+- Whisp's committed pin was `2747875` when last checked (ai-whisperer `0a70523b`); the v1.19 pin was pending at this closeout. Confirm in `../ai-whisperer` before relying on this.
 - A v1.19 re-pin requires Whisp's OSC 133 mirror override (ai-whisperer `77b1d871`, branch `probe/swiftterm-v1.19.0`) — `handoffs/2026-09-29-upstream-v1.19.0.md`.
 - Upstream v1.19.0 is `464df52` (merged at `f17a40f`); the prior sync was `cf7764f` (via `affe8412`) — `handoffs/2026-08-08-upstream-sync-cf7764f.md`.
 
-## v1.19.0 adoption (`85cb8ca`, pending publication)
+## v1.19.0 adoption (`85cb8ca`, published; Whisp pin pending)
 
 - Frozen qualification: `swift build` + `swift test --no-parallel` green on M5 Max Metal (865 tests/80 suites + 85 XCTest); iOS six filtered suites and TerminalApp CG/Metal 43/43 pass; Whisp `77b1d871` builds for macOS/iOS Sim/visionOS Sim — `handoffs/2026-09-29-upstream-v1.19.0.md`.
 - No human visual, physical-keyboard or framebuffer acceptance has been done; Metal evidence is draw data/state only.
