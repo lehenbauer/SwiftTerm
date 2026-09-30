@@ -6,20 +6,20 @@ Bounded snapshot of what is true now. History and narrative live in
 ## Branches and pins
 
 - `main` is `2747875` (iOS scrollback momentum/prepend sync, atop the `b9a2d45` styled-selection-runs merge); `origin/main` matched it at last fetch.
-- Upstream v1.19.0 frozen source candidate `85cb8ca` lives only on local `integrate/upstream-v1.19.0` (worktree `../SwiftTerm-v119-integration`); not merged, not pushed — `handoffs/2026-09-29-upstream-v1.19.0.md`.
-- Candidate is on hold pending a performance disposition; no shipping performance fix exists — `handoffs/2026-09-29-upstream-v1.19.0.md`.
+- Upstream v1.19.0 adoption is selected and user-authorized (tested source `85cb8ca`, docs-only commits after) on local `integrate/upstream-v1.19.0` (worktree `../SwiftTerm-v119-integration`); merge to `main`, push and Whisp re-pin are pending coordinator live verification — `handoffs/2026-09-29-upstream-v1.19.0-adoption.md`.
 - Whisp's committed pin was `2747875` when last checked (ai-whisperer `0a70523b`); no durable v1.19 re-pin has happened. Confirm in `../ai-whisperer` before relying on this.
 - A v1.19 re-pin requires Whisp's OSC 133 mirror override (ai-whisperer `77b1d871`, branch `probe/swiftterm-v1.19.0`) — `handoffs/2026-09-29-upstream-v1.19.0.md`.
 - Last merged upstream on `main` is `cf7764f` (via `affe8412`); v1.19.0 is `464df52` — `handoffs/2026-08-08-upstream-sync-cf7764f.md`.
 
-## v1.19.0 candidate (`85cb8ca`)
+## v1.19.0 adoption (`85cb8ca`, pending publication)
 
 - Frozen qualification: `swift build` + `swift test --no-parallel` green on M5 Max Metal (865 tests/80 suites + 85 XCTest); iOS six filtered suites and TerminalApp CG/Metal 43/43 pass; Whisp `77b1d871` builds for macOS/iOS Sim/visionOS Sim — `handoffs/2026-09-29-upstream-v1.19.0.md`.
 - No human visual, physical-keyboard or framebuffer acceptance has been done; Metal evidence is draw data/state only.
-- Headless feed p50 is +9–10% vs `2747875`, mostly OSC 133 semantic row bookkeeping; diagnostic ablations cannot ship.
-- Metal `arabic-line` RenderBench feed ticks drop ~39% from the release merge; that is feed cost (+24% per tick) plus more successful draw builds, not a measured rendering or presented-frame slowdown.
+- Headless ASCII feed p50 is +9.3–10.3% vs `2747875`, mostly OSC 133 semantic row bookkeeping; accepted by the adoption decision, not fixed; diagnostic ablations cannot ship.
+- Metal `arabic-line` RenderBench feed ticks drop ~39% from the release merge; that is feed cost (+24% per tick) plus more successful draw builds, not a measured rendering or presented-frame slowdown. Not an adoption priority (Metal disabled in Whisp; CG near baseline).
 - Long headless Arabic control: initial merge +35.7% feed time vs main, overlapping pure release; upstream ranges d90963a..1052996 (+12.1%) and 1052996..464df52 (+21.1%) account for material cost, not individually bisected — `handoffs/2026-09-29-upstream-v1.19.0.md`.
-- Clear-history on the candidate keeps absolute row identities, saved cursor, image counts and follow state; captured-history OSC 133 metadata is not imported.
+- Clear-history on `85cb8ca` keeps absolute row identities, saved cursor, image counts and follow state; captured-history OSC 133 metadata is not imported.
+- Next upstream pickup: stable released tag after v1.19.0 only (v1.20.0 is a pre-release); upstream `6ea9082` targets the measured weak-owner cost; do not move Whisp feed off main on v1.19 — `handoffs/2026-09-29-upstream-v1.19.0-adoption.md`.
 
 ## Renderer contracts (on `main`)
 

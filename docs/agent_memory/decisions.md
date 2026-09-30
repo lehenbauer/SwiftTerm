@@ -2,10 +2,12 @@
 
 ## 2026-09-29
 
-- Adopt only released upstream SwiftTerm tags into the fork; do not pull unreleased upstream `main` work (e.g. Ghostty-derived IO/SIMD) into a release integration to chase throughput — `handoffs/2026-09-29-upstream-v1.19.0.md`.
+- Adopt only stable released upstream SwiftTerm tags into the fork (GitHub pre-releases such as v1.20.0 are not eligible); do not pull unreleased upstream `main` work (e.g. Ghostty-derived IO/SIMD, `6ea9082`) into a release integration to chase throughput — `handoffs/2026-09-29-upstream-v1.19.0-adoption.md`.
 - Never re-pin Whisp to a v1.19-based SwiftTerm without Whisp's OSC 133 mirror override (ai-whisperer `77b1d871` or equivalent) in the same change; without it, built-in OSC 133 A/N/L handling makes tmux mirrors diverge from tmux's grid.
 - Do not read RenderBench feed ticks/s as rendering latency or presented frames: the v1.19 Metal `arabic-line` ~39% tick drop is feed cost plus more successful draw builds, and the 2026-08-08 3–4% BiDi acceptance does not cover it.
 - Keep v1.19 `clearScrollback` preserving absolute row identities, the screen-relative saved cursor, image counts and output-follow state (including the global follow flag when cleared under the alternate screen), and never import OSC 133 marks, groups or cell tags from captured history.
+- v1.19.0 adoption accepts its +9.3–10.3% headless ASCII feed cost as measured; do not re-open the hold or record the cost as fixed until a released upstream change (e.g. `6ea9082`) is measured with `Benchmarks/` — `handoffs/2026-09-29-upstream-v1.19.0-adoption.md`.
+- Do not move Whisp's `feed` off the main thread on v1.19: its "background feed" comments lack upstream's terminal locks (`222400c`), callback marshalling (`282a7bd`) and snapshot CG rendering (`59b3017`).
 - Do not drop `owningBuffer` assignment in `Buffer.onLineAttached` to recover feed cost: it measured −2.6%/−4.1% p50 but is required for OSC 133 cross-buffer behavior.
 
 ## 2026-08-11
