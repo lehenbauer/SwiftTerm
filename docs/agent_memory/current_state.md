@@ -5,11 +5,11 @@ Bounded snapshot of what is true now. History and narrative live in
 
 ## Branches and pins
 
-- `main` is `2747875` (iOS scrollback momentum/prepend sync, atop the `b9a2d45` styled-selection-runs merge); `origin/main` matched it at last fetch.
-- Upstream v1.19.0 adoption is selected and user-authorized (tested source `85cb8ca`, docs-only commits after) on local `integrate/upstream-v1.19.0` (worktree `../SwiftTerm-v119-integration`); merge to `main`, push and Whisp re-pin are pending coordinator live verification — `handoffs/2026-09-29-upstream-v1.19.0-adoption.md`.
-- Whisp's committed pin was `2747875` when last checked (ai-whisperer `0a70523b`); no durable v1.19 re-pin has happened. Confirm in `../ai-whisperer` before relying on this.
+- Local `main` was fast-forwarded to v1.19.0 source `85cb8ca` (reflog 2026-09-29) and the `origin/main` tracking ref showed `85cb8ca`; coordinator verification of publication is pending. Prior `main` was `2747875`.
+- Upstream v1.19.0 adoption is selected and user-authorized (tested source `85cb8ca`); the docs-only commits recording it live on `integrate/upstream-v1.19.0` (worktree `../SwiftTerm-v119-integration`) until merged; Whisp re-pin and live verification are pending with the coordinator — `handoffs/2026-09-29-upstream-v1.19.0-adoption.md`.
+- Whisp's committed pin was `2747875` when last checked (ai-whisperer `0a70523b`); no v1.19 re-pin was known at this closeout. Confirm in `../ai-whisperer` before relying on this.
 - A v1.19 re-pin requires Whisp's OSC 133 mirror override (ai-whisperer `77b1d871`, branch `probe/swiftterm-v1.19.0`) — `handoffs/2026-09-29-upstream-v1.19.0.md`.
-- Last merged upstream on `main` is `cf7764f` (via `affe8412`); v1.19.0 is `464df52` — `handoffs/2026-08-08-upstream-sync-cf7764f.md`.
+- Upstream v1.19.0 is `464df52` (merged at `f17a40f`); the prior sync was `cf7764f` (via `affe8412`) — `handoffs/2026-08-08-upstream-sync-cf7764f.md`.
 
 ## v1.19.0 adoption (`85cb8ca`, pending publication)
 
