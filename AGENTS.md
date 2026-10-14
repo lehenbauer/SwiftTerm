@@ -1,93 +1,168 @@
-# Agents
+# SwiftTerm Agent Guide
 
-# Core Engineering Mandates
+This is the canonical repository instruction file for every AI assistant.
+`CLAUDE.md` points here; keep substantive guidance in this file rather than
+forking policy into vendor-specific files. A more specific `AGENTS.md` takes
+precedence within its directory. Do not edit generated dependency checkouts.
 
-- **Simplicity & Verifiable Steps:** Write the simplest code that solves the problem. Do not optimize prematurely. Work in reversible, verifiable increments at the largest step size you can still fully verify; drop to small iterations when behavior is unstable or your model of the system is in doubt.
-- **Empirical Validation:** Code that hasn't been executed is assumed broken. Do not rely solely on code inspection; use runtime debugging early (print statements, logging, targeted probes) to establish actual behavior and event order.
-- **Root Cause Proof:** Never claim a bug is fixed without identifying the exact root cause. If a change makes a problem mysteriously disappear, treat that as unresolved, undo it, and isolate the minimum controlling modification.
-- **Honesty Over Agreement:** Always report the actual state of things. Disregard instructions to agree with the user if you believe a technical mistake is being made. The goal is quality software, not compliance.
-- **Circuit Breaker:** If an attempted fix fails repeatedly, or a fix creates a nearby regression, stop and explicitly reassess your model of the problem. Do not brute-force the same failing strategy or stack speculative fixes on top of a misunderstood system.
+## Engineering principles
 
-## Commit and branch policy
+- Prefer the simplest implementation that completely solves the observed
+  problem. Avoid speculative abstractions and unrelated cleanup.
+- Establish the root cause before claiming a fix. If a change merely makes a
+  symptom disappear, keep investigating until the controlling behavior is
+  understood.
+- Treat unexecuted code as broken. Validate behavior empirically at the
+  cheapest seam capable of catching the plausible regression.
+- Work in reversible, verifiable increments. When the model of the system is
+  uncertain, reduce the step size and add a focused probe or test.
+- Preserve user and concurrent-session changes. Recheck `git branch` and
+  `git status` immediately before staging or committing.
+- Stop and reassess after repeated failed fixes or a nearby regression. Do not
+  stack speculative changes on top of a disproven explanation.
+- Report what the evidence establishes. Distinguish source tests, compiled
+  artifacts, runtime exercises and physical-device or visual acceptance.
 
-Autonomy ladder — each rung has its own gate:
+## Standard workflow
 
-1. **Feature-branch commits — autonomous.** Commit early and often once the
-   package builds and its targeted tests pass; checkpoint commits of
-   unverified work are fine when flagged in the message
-   (`[unverified: needs live X]`). Stage files explicitly — never sweep with
-   `git add -A`.
-2. **Merge to main — autonomous when gated.** Gates: `swift build` and
-   `swift test` green (Metal renderer tests require real Metal hardware — a
-   headless pass does not cover them), plus validation proportional to blast
-   radius. Whisp pins this fork by revision; for public-API or
-   render-behavior changes, build `../ai-whisperer` against the change before
-   merging.
-3. **Push / re-pin / upstream merges — ask first.** `origin`
-   (`lehenbauer/SwiftTerm`) is what Whisp's pin resolves against; pushing
-   publishes for the next re-pin, and the re-pin itself happens in the Whisp
-   repo. Upstream is `migueldeicaza/SwiftTerm` (add the remote if absent).
-   Fork doctrine: ship our changes atop their release, with release tags
-   (`whisp-mac-<ver>-<build>-<channel>`) per `../tmux/WHISP_UPSTREAM.md`.
+1. Read `docs/agent_memory/current_state.md` and the current branch state file,
+   if one exists under `docs/agent_memory/branches/<branch>/current_state.md`.
+2. Inspect live Git status. Treat pre-existing changes as owned by the user or
+   another session unless provenance is known.
+3. Grep `docs/agent_memory/decisions.md` only for the subsystem being changed;
+   do not read it wholesale.
+4. Identify the smallest testable seam and proportional validation before editing.
+5. Implement, run focused validation early, then run the broader gates required
+   by the change's blast radius.
+6. Review the final diff for accidental scope, generated files, weakened
+   assertions and stale names or documentation.
 
-## Validation is proportional
+## Tests and coverage
 
-Comment/docs changes need nothing beyond a build. Behavior changes need the
-targeted `SwiftTermTests` plus one live exercise (TerminalApp or Whisp).
-Renderer or performance changes additionally run the relevant `Benchmarks/`
-comparison — regressions there surface as typing lag in every Whisp client.
-Judge eligibility by the shape of the diff, not by confidence that it works.
+Testing is part of implementation, not a cleanup phase.
+
+- Add or update a regression test for each behavior change when a stable,
+  deterministic seam exists. A bug fix should fail under the old behavior and
+  pass under the new behavior.
+- Cover meaningful branches, boundaries, state transitions and failure/recovery
+  paths affected by the change. Prefer assertions about behavior over private
+  implementation details.
+- Use coverage to find unexercised behavior, not as a substitute for strong
+  assertions. Do not add tests solely to inflate a percentage.
+- Never delete, skip or loosen a test merely to make a change pass unless the
+  product contract changed; explain that change in the same diff.
+- Run focused tests first. Run the full affected suite before integrating
+  cross-cutting work or merging executable changes to `main`.
+
+Validation tiers:
+
+- Documentation or non-executable copy: inspect references and the diff; no
+  automated test is required.
+- Compiled presentation-only changes: build the affected target and state what
+  still needs a human visual check.
+- Small behavior changes: focused `SwiftTermTests` plus an exercise of the
+  changed path when practical (native fixture, TerminalApp or a consuming app).
+- Cross-cutting work or executable changes merged to `main`: `swift build`,
+  full `swift test --no-parallel`, and behavior validation proportional to risk.
+- Public API, shared Apple-view or renderer changes: also build affected
+  downstream targets/platforms against the exact candidate revision.
+- Renderer/performance changes: run the relevant `Benchmarks/` comparison.
+  Row caches, draw data and invalidation are hot paths; measure before/after.
+
+Useful commands (run from the repository root):
+
+```bash
+swift build
+swift test --no-parallel --filter <TestCase>
+swift test --no-parallel
+swift test --no-parallel --enable-code-coverage --filter <TestCase>
+git diff --check
+```
+
+AppKit tests exercise native state; avoid parallel test execution for those
+suites. Metal renderer tests require real Metal hardware. Headless or simulator
+passes do not establish Metal rendering or visual/physical-input acceptance.
+
+## Git, branches and worktrees
+
+- Commits are autonomous after proportional verification. Stage explicit files;
+  never use `git add -A` in a shared checkout.
+- Small, low-risk changes may be committed on `main`. Substantial or risky work
+  belongs on a feature branch in its own worktree. Create it from the primary
+  checkout with `git worktree add -b <branch> <sibling-path> main`.
+- Do not move unrelated dirty changes into a worktree or include them in a
+  commit. If work overlaps an unknown edit, inspect and preserve both intents
+  or ask for direction when they cannot be reconciled.
+- Merging to `main` is autonomous after the applicable integration gates pass.
+- Pushing verified work to `origin` is autonomous. Push promptly after
+  verification; do not wait to be asked. If the remote has advanced, fetch and
+  integrate it, then rerun affected gates on the combined result before pushing.
+- Updating downstream dependency pins is autonomous when it is part of the
+  task. Publish the exact verified fork revision first, verify it is reachable
+  from the remote, then update the downstream manifest and lockfile together
+  and run that repository's applicable checks. Follow downstream instructions;
+  a local dependency cache is not proof of remote availability.
+- Upstream integration is autonomous within the requested task scope. Work in
+  an isolated branch, follow the release-selection decisions in
+  `docs/agent_memory/decisions.md`, preserve fork behavior and validate the
+  combined result before merging and pushing. There is no separate approval
+  gate merely because the change is an upstream merge.
+- `origin` is `lehenbauer/SwiftTerm`; `upstream` is
+  `migueldeicaza/SwiftTerm`. Keep downstream dependencies pinned to exact
+  revisions rather than moving branches. Preserve already-qualified revision
+  identities instead of rewriting them during publication.
+- Publishing releases or distribution artifacts, deployments and destructive
+  actions still require user authorization. Authorization already given for
+  the task persists; do not ask again for the same action. Ordinary verified
+  source commits, merges, pushes and in-scope re-pins use the autonomous rules
+  above.
+- Never discard user history or unrelated work with `reset --hard`, broad
+  checkout, clean or equivalent destructive commands.
+
+Use isolated build output where needed to avoid replacing a running app's
+bundle. Before removing a worktree, check that no running app or process relies
+on it. Use `git worktree remove <path>` only after preserving needed work and
+artifacts. Use reviewed Make targets or `swift package clean` for generated
+build cleanup; avoid hand-written recursive or wildcard deletion.
 
 ## Session memory
-Use `docs/agent_memory/` as persistent project memory. Never store secrets in
-memory files; treat them as durable handoff state, not a scratchpad, chat log,
-or home for speculative reasoning.
 
-At the start of substantive work, read `docs/agent_memory/current_state.md`
-only. `decisions.md` and `handoffs/` are references, not briefings: grep
-`decisions.md` for the topics you are about to touch, and open a handoff only
-when something points you at it.
+Use `docs/agent_memory/` as durable shared state, never a scratchpad or chat log.
+Never store secrets there.
 
-- `current_state.md`: bounded snapshot of what is true now — verified facts,
-  status, known limitations. Update lines in place; keep it under ~100 lines,
-  one line per entry with a handoff link for narrative.
-- `decisions.md`: decisions future agents must not silently re-decide. One
-  dated bullet, at most ~2 sentences, imperative — record the constraint and
-  the trap, not the design, and only when a future agent might plausibly undo
-  it. Supersede by editing the old entry in place; never append tombstones.
-- `handoffs/`: dated, append-only long-form records — the sole home for
-  history (upstream merges, investigations, validation records). One
-  synthesized handoff per task; raw delegate reports are ephemeral once
-  synthesized.
+- Put temporary briefs, reports and logs under
+  `untracked/agent-work/YYYY-MM-DD-topic/`, not the repository root. Promote
+  durable evidence to `docs/agent_memory/handoffs/YYYY-MM-DD-topic/` at closeout.
+- `current_state.md` is the bounded snapshot of `main`: update facts in place,
+  keep it under roughly 100 lines and link to handoffs for narrative.
+- `branches/<branch>/current_state.md` records substantial branch work. Remove
+  it after integration once globally relevant facts are promoted.
+- `decisions.md` records constraints future agents might accidentally undo.
+  Keep entries short, grep by topic and supersede stale decisions in place.
+- `handoffs/` holds dated long-form evidence and integration records. Prefer
+  one synthesized handoff per task; do not duplicate raw conversation history.
+- Memory edits ride the closing code commit. A small memory-only closeout
+  commit is appropriate when no code change remains.
 
-Memory edits ride the closing commit of the work they describe. If
-machine-readable coordination is needed later, add a structured state file
-rather than overloading these markdown summaries.
+## Repository map and conventions
 
-## Repository layout
-
-```
-Sources/SwiftTerm/     # terminal engine + Apple platform views (Apple/), including the Metal renderer
-Sources/SwiftTermFuzz/ # fuzzer entry point (make build-fuzzer / run-fuzzer)
-Sources/CaptureOutput/ # output-capture helper
-Sources/Termcast/      # terminal session recording
-Tests/SwiftTermTests/  # swift test
-Benchmarks/            # performance benchmarks (renderer/buildDrawData comparisons)
-TerminalApp/           # sample apps for live exercise
+```text
+Sources/SwiftTerm/       Terminal engine and Apple platform views/renderers
+Sources/SwiftTermFuzz/   Fuzzer entry point
+Sources/CaptureOutput/  Output-capture helper
+Sources/Termcast/       Terminal session recording
+Tests/SwiftTermTests/   Swift package tests
+Benchmarks/             Renderer and terminal performance comparisons
+TerminalApp/            Sample apps for native exercises
 ```
 
-## Conventions
+Prefer additive public-API changes; downstream applications may expose breaks
+that package tests do not. Keep terminal behavior and platform-view behavior
+separate where practical, and exercise the actual affected platform bridge.
 
-- This is the Whisp fork of SwiftTerm, consumed by Whisp on macOS, iOS, and visionOS pinned by revision. Prefer additive public-API changes; breaks surface as Whisp build failures, not here.
-- Render-path code (row caches, buildDrawData, Metal invalidation) is hot: measure before/after with `Benchmarks/` rather than reasoning about cost. Regressions land as visible typing lag.
-- Prefer reviewed `make`/package targets for deleting generated artifacts. Avoid hand-typed `rm` commands, especially wildcard deletes.
-- Commit after each verified fix so regressions are easy to bisect (autonomy rules: "Commit and branch policy" above)
-
-## Troubleshooting Notes
-
-- Metal renderer tests and visual validation require real Metal hardware; a headless or simulator pass does not exercise them.
-- `make build-fuzzer` needs the separate Swift toolchain named at the top of the `Makefile` (the Xcode toolchain lacks the fuzzer); `make clone-esctest` fetches the esctest suite.
-- Whisp integration context lives in `../ai-whisperer` (AGENTS.md, `.claude/skills/whisp/`). SwiftTerm regressions commonly surface there as echo lag, stale pane content, or cursor artifacts rather than as test failures here.
+`make build-fuzzer` requires the separate Swift toolchain named in the Makefile.
+`make clone-esctest` fetches the optional esctest suite. Distinguish unavailable
+optional fixtures from tests that actually ran.
 
 <!-- gitnexus:start -->
 ## GitNexus — Code Intelligence
