@@ -5,9 +5,9 @@ Bounded snapshot of what is true now. History and narrative live in
 
 ## Branches and pins
 
-- `main`/`origin/main` are adopted upstream v1.19.0 source `85cb8ca` plus docs-only commits (pushed, `git ls-remote` verified 2026-09-29); prior source was `2747875`.
+- `main`/`origin/main` include adopted upstream v1.19.0 plus Mac selection repair `5e91b9e` and guide update `3ebb207` (pushed, `git ls-remote` verified 2026-10-14). Source/tests after the repair are unchanged.
 - v1.19.0 adoption is complete and published; no runtime deployment/relaunch; human visual and physical-keyboard acceptance unclaimed — `handoffs/2026-09-29-upstream-v1.19.0-adoption.md`.
-- Whisp `main` `cb567198` pins SwiftTerm `85cb8ca` with the OSC 133 override; unattended app builds pass `-skipPackagePluginValidation` for the audited `SwiftTermBuildInfoPlugin` — `../ai-whisperer/docs/agent_memory/handoffs/2026-09-29-swiftterm-v1.19.0-adoption.md`.
+- Whisp integration `1956ad1b` on public `main` pins exact SwiftTerm `5e91b9e` in all four active manifests/lockfiles; OSC 133 override and plugin-validation flags remain. Fresh cache-disabled Xcode resolution fetched the exact published revision — `handoffs/2026-10-14-mac-selection-anchor.md`.
 - A v1.19 re-pin requires Whisp's OSC 133 mirror override (ai-whisperer `77b1d871`, branch `probe/swiftterm-v1.19.0`) — `handoffs/2026-09-29-upstream-v1.19.0.md`.
 - Upstream v1.19.0 is `464df52` (merged at `f17a40f`); the prior sync was `cf7764f` (via `affe8412`) — `handoffs/2026-08-08-upstream-sync-cf7764f.md`.
 
@@ -30,9 +30,10 @@ Bounded snapshot of what is true now. History and narrative live in
 - Upstream BiDi bookkeeping costs ~3–4% feed throughput, accepted; a mode-gated fast path is not done — `handoffs/2026-08-08-upstream-sync-cf7764f.md`.
 - Selections translate across `prependScrollbackCapture` (`b2c68bc`) — `handoffs/2026-08-08-upstream-sync-cf7764f.md`.
 
-## Mac selection press anchor (branch `fix/mac-selection-anchor`, unpublished)
+## Mac selection press anchor (`5e91b9e`, published)
 
-- Native single-click drag anchors at the `mouseDown` cell via a single-use line-identity anchor; 35 `MacSelectionAnchorTests` plus full suite green; not merged, pushed, or re-pinned — `handoffs/2026-10-14-mac-selection-anchor.md`.
+- Native single-click drag anchors at the `mouseDown` cell via a single-use line-identity anchor; 35 regressions, full fork/downstream suites, 70 native Whisp assertions and Mac/iOS/Vision builds pass. Integrated/pushed and Whisp re-pinned; no live app rollout or physical-trackpad acceptance — `handoffs/2026-10-14-mac-selection-anchor.md`.
+- User-requested `AGENTS.md` modernization (`3ebb207`) permits verified autonomous commits/merges/pushes and in-scope pins/upstream integration. Preserve tests, unrelated work and explicit authorization for releases/deployments; follow current guide rather than old ask-first handoff instructions.
 
 ## Fork API surfaces (on `main`)
 

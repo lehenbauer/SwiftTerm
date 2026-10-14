@@ -1,8 +1,9 @@
 # Mac selection starts at the original press — 2026-10-14
 
-Status: fixed and verified on branch `fix/mac-selection-anchor` (base
-`fc35950`). Not pushed, not merged to `main`, Whisp not re-pinned; the Whisp
-coordinator owns integration and the publication approval.
+Status: fixed, verified, integrated and pushed on 2026-10-14. Exact repair
+`5e91b9e23267698c6cf14e17864b0a054ae34929` is on public `main`; Whisp
+integration `1956ad1bbb8d66e12cc5f757e6bf5258fab7d767` pins it in all four
+active manifests/lockfiles. No live app rollout or physical-trackpad acceptance.
 
 ## Defect
 
@@ -57,3 +58,30 @@ nothing. Diagnosis and the Opus 5.5 plan review are in Whisp's
 - With `allowMouseReporting`, a linefeed still clears an established selection
   (existing policy), so a streaming pane can still drop a selection after the
   first drag.
+
+## Publication and guide modernization — 2026-10-14
+
+The user explicitly approved publishing the verified repair and integrating
+Whisp, and asked to align this fork's `AGENTS.md` with Whisp's general workflow
+while omitting Whisp-specific rules. Guide-only commit
+`3ebb2074bf81e8b8eb9483039b6d8898d3f55a99` permits verified autonomous source
+commits, merges, pushes and in-scope dependency pins/upstream integration.
+Testing, exact revision identity, unrelated-work preservation and authorization
+for releases/deployments remain. `CLAUDE.md` already points to the canonical
+guide; the managed GitNexus block was preserved verbatim.
+
+Both primary branches fast-forwarded without conflicts, and `git push origin
+main` plus independent `git ls-remote origin refs/heads/main` confirmed source
+publication (SwiftTerm `3ebb207`, Whisp `1956ad1b`). `git diff 5e91b9e
+3ebb207 -- Sources Tests` is empty. Whisp's normal `make spm-mirror-refresh`
+passed. A fresh `xcodebuild -resolvePackageDependencies` with
+`-disablePackageRepositoryCache` and a private `-clonedSourcePackagesDirPath`
+fetched the public fork and checked out clean `5e91b9e`; the private bare
+repository's origin is GitHub and it has no external object alternates.
+
+Whisp's full support/backend suites, exact-revision Mac/iOS/Vision builds,
+70 native wrapper assertions and Opus 5.5 final ACCEPT are recorded in
+`../ai-whisperer/docs/agent_memory/handoffs/2026-10-14-mac-selection-anchor/`.
+Later changes were documentation only; guide references and `git diff --check`
+passed. Primary fork's unrelated untracked workspace/local-pin backup and
+Whisp's modified TODO.md were preserved. The running app was not relaunched.
