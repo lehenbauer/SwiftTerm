@@ -30,6 +30,10 @@ Bounded snapshot of what is true now. History and narrative live in
 - Upstream BiDi bookkeeping costs ~3–4% feed throughput, accepted; a mode-gated fast path is not done — `handoffs/2026-08-08-upstream-sync-cf7764f.md`.
 - Selections translate across `prependScrollbackCapture` (`b2c68bc`) — `handoffs/2026-08-08-upstream-sync-cf7764f.md`.
 
+## Mac selection press anchor (branch `fix/mac-selection-anchor`, unpublished)
+
+- Native single-click drag anchors at the `mouseDown` cell via a single-use line-identity anchor; 35 `MacSelectionAnchorTests` plus full suite green; not merged, pushed, or re-pinned — `handoffs/2026-10-14-mac-selection-anchor.md`.
+
 ## Fork API surfaces (on `main`)
 
 - `Terminal.inspect()` and view `inspectGeometry`/`inspectInputPolicy`/`inspectAll` provide Codable third-witness dumps (`164fb11`).

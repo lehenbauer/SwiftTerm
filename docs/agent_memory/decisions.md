@@ -1,5 +1,9 @@
 # Decisions
 
+## 2026-10-14
+
+- Keep the Mac first-drag press anchor as line identity + `recycleGeneration` + column count, consumed by the first native drag. A bare buffer `Position` selects the wrong text after scrollback trim/history prepend, and a reusable anchor resurrects cancelled selections. Do not invalidate it on linefeed; that reintroduces the bug in streaming panes — `handoffs/2026-10-14-mac-selection-anchor.md`.
+
 ## 2026-09-29
 
 - Adopt only stable released upstream SwiftTerm tags into the fork (GitHub pre-releases such as v1.20.0 are not eligible); do not pull unreleased upstream `main` work (e.g. Ghostty-derived IO/SIMD, `6ea9082`) into a release integration to chase throughput — `handoffs/2026-09-29-upstream-v1.19.0-adoption.md`.

@@ -1321,6 +1321,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     public override func resignFirstResponder() -> Bool {
         let response = super.resignFirstResponder()
         if response {
+            pendingSelectionPress = nil
             caretView.disableAnimations()
             hasFocus = false
             terminal.setTerminalFocus(false)
@@ -1566,6 +1567,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     //
     public override func keyDown(with event: NSEvent) {
         selection.active = false
+        pendingSelectionPress = nil
         let eventFlags = event.modifierFlags
 
         if terminal.keyboardEnhancementFlags.isEmpty,
@@ -2886,7 +2888,34 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// apply.
     private(set) var semanticDeferralScheduleCount = 0
 
+    // The cell a single-click press landed on, kept until the gesture's first
+    // native drag. AppKit can deliver that first drag cells away from the
+    // press, so the selection must start here rather than at the drag's hit.
+    // The line identity follows rows shifted by scrollback trim or history
+    // prepend and rejects recycled lines, resets and buffer switches.
+    private struct PendingSelectionPress {
+        let line: BufferLine
+        let recycleGeneration: UInt64
+        let col: Int
+        let cols: Int
+    }
+    private var pendingSelectionPress: PendingSelectionPress?
+
+    // Consumes the pending press, returning its current buffer position when
+    // the pressed line still exists with unchanged column geometry.
+    private func takePendingSelectionPress() -> Position? {
+        guard let press = pendingSelectionPress else { return nil }
+        pendingSelectionPress = nil
+        guard press.cols == terminal.cols,
+              let row = terminal.semanticRow(forLineIdentity: press.line,
+                                             recycleGeneration: press.recycleGeneration) else {
+            return nil
+        }
+        return Position(col: press.col, row: row)
+    }
+
     open override func mouseDown(with event: NSEvent) {
+        pendingSelectionPress = nil
         pendingSemanticClick?.cancel()
         pendingSemanticClick = nil
         didSelectionDrag = false
@@ -2921,6 +2950,11 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
 
             selection.select(row: hit.row)
         }
+        if event.clickCount == 1 && !selection.active, let line = terminal.bufferLine(atRow: hit.row) {
+            pendingSelectionPress = PendingSelectionPress(line: line,
+                                                          recycleGeneration: line.recycleGeneration,
+                                                          col: hit.col, cols: terminal.cols)
+        }
         setNeedsDisplay(bounds)
     }
     
@@ -2938,6 +2972,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         defer {
             didSelectionDrag = false
             pointerPressSnapshot.pressWasSemanticEligible = false
+            pendingSelectionPress = nil
         }
         stopSelectionAutoScrollTimer()
         autoScrollDelta = 0
@@ -3006,6 +3041,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         let hit = mouseHit.grid
         if allowMouseReporting && !shiftBypassesMouseReporting(for: event) {
             if terminal.mouseMode.sendButtonTracking() {
+                pendingSelectionPress = nil
                 let flags = encodeMouseEvent(with: event)
                 let screenRow = max (0, min (displayBuffer.rows - 1, hit.row - displayBuffer.yDisp))
                 terminal.sendMotion(buttonFlags: flags, x: hit.col, y: screenRow, pixelX: mouseHit.pixels.col, pixelY: mouseHit.pixels.row)
@@ -3013,11 +3049,19 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
                 return
             }
             if terminal.mouseMode != .off {
+                pendingSelectionPress = nil
                 return
             }
         }
-                
+
+        // The press anchors only the gesture's first native drag; a selection
+        // cancelled later in the gesture restarts at the current hit.
+        let press = takePendingSelectionPress()
         if selection.active {
+            selection.dragExtend(bufferPosition: Position(col: hit.col, row: hit.row))
+        } else if let press {
+            selection.setSoftStart(bufferPosition: press)
+            selection.startSelection()
             selection.dragExtend(bufferPosition: Position(col: hit.col, row: hit.row))
         } else {
             selection.setSoftStart(bufferPosition: Position(col: hit.col, row: hit.row))

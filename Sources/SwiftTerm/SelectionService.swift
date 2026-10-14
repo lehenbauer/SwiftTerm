@@ -234,10 +234,9 @@ public class SelectionService: CustomDebugStringConvertible {
     }
     
     /**
-     * Sets the start and end positions but does not start selection
-     * this lets us record the last position of mouse clicks so that
-     * drag and shift+click operations know from where to start selection
-     * from.
+     * Collapses the selection to a single point and marks it active,
+     * notifying the delegate. It keeps the current selection mode; call
+     * `startSelection()` afterwards to begin a character-mode selection.
      *
      * The location is screen-relative
      */
@@ -246,12 +245,11 @@ public class SelectionService: CustomDebugStringConvertible {
     }
     
     /**
-     * Sets the start and end positions but does not start selection
-     * this lets us record the last position of mouse clicks so that
-     * drag and shift+click operations know from where to start selection
-     * from.
+     * Collapses the selection to a single point and marks it active,
+     * notifying the delegate. It keeps the current selection mode; call
+     * `startSelection()` afterwards to begin a character-mode selection.
      *
-     * The locoation is buffer-relative
+     * The location is buffer-relative
      */
     public func setSoftStart (bufferPosition: Position) {
         start = bufferPosition
