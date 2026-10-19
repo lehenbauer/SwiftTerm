@@ -5,9 +5,9 @@ Bounded snapshot of what is true now. History and narrative live in
 
 ## Branches and pins
 
-- `main`/`origin/main` include adopted upstream v1.19.0 plus Mac selection repair `5e91b9e` and guide update `3ebb207` (pushed, `git ls-remote` verified 2026-10-14). Source/tests after the repair are unchanged.
+- `main` includes adopted upstream v1.19.0, Mac selection `5e91b9e`, and wrapped scrollback retention `674ad88`. Exact downstream pin remains `674ad8896e9c7afa80b3fa531dfa46213eecf1b0`; later closeout changes are documentation only.
 - v1.19.0 adoption is complete and published; no runtime deployment/relaunch; human visual and physical-keyboard acceptance unclaimed — `handoffs/2026-09-29-upstream-v1.19.0-adoption.md`.
-- Whisp integration `1956ad1b` on public `main` pins exact SwiftTerm `5e91b9e` in all four active manifests/lockfiles; OSC 133 override and plugin-validation flags remain. Fresh cache-disabled Xcode resolution fetched the exact published revision — `handoffs/2026-10-14-mac-selection-anchor.md`.
+- Whisp integration qualifies all four pins at `674ad88`: Mac/iOS Simulator/visionOS builds pass with checkout revision and Terminal.swift hash verified; full Whisp support/backend suites pass. Physical iPad acceptance remains pending — `handoffs/2026-10-18-scrollback-wrap.md`.
 - A v1.19 re-pin requires Whisp's OSC 133 mirror override (ai-whisperer `77b1d871`, branch `probe/swiftterm-v1.19.0`) — `handoffs/2026-09-29-upstream-v1.19.0.md`.
 - Upstream v1.19.0 is `464df52` (merged at `f17a40f`); the prior sync was `cf7764f` (via `affe8412`) — `handoffs/2026-08-08-upstream-sync-cf7764f.md`.
 
@@ -20,6 +20,11 @@ Bounded snapshot of what is true now. History and narrative live in
 - Long headless Arabic control: initial merge +35.7% feed time vs main, overlapping pure release; upstream ranges d90963a..1052996 (+12.1%) and 1052996..464df52 (+21.1%) account for material cost, not individually bisected — `handoffs/2026-09-29-upstream-v1.19.0.md`.
 - Clear-history on `85cb8ca` keeps absolute row identities, saved cursor, image counts and follow state; captured-history OSC 133 metadata is not imported.
 - Next upstream pickup: stable released tag after v1.19.0 only (v1.20.0 is a pre-release); upstream `6ea9082` targets the measured weak-owner cost; do not move Whisp feed off main on v1.19 — `handoffs/2026-09-29-upstream-v1.19.0-adoption.md`.
+
+## Wrapped history capture (`674ad88`)
+
+- Bounded one-row scratch history retains physical wrapped rows; default implicit padding is capture-only and ordinary BCE/explicit erases stay unchanged. Opus 5.5 accepted the plan revisions, corrected implementation and final fixture gate closure — `handoffs/2026-10-18-scrollback-wrap.md`.
+- Full suite 85 XCTest + 914 Swift Testing, actual iPad simulator 13 UIKit + 16 hydration, private six-width replay and downstream Mac/iOS/Vision gates pass. Test-only MainActor isolation closes the pre-existing repaint fixture race; all prior failures retained. OSC 8 target lifetime/full-capacity redundant fetching remain separate.
 
 ## Renderer contracts (on `main`)
 

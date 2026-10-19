@@ -1,8 +1,6 @@
 # Wrapped scrollback capture retention
 
-Branch `fix/scrollback-wrap`, based on docs-current `d45267b` (production
-source identical to `5e91b9e`). No push, main merge or downstream pin change.
-The coordinator owns fresh final review and downstream qualification.
+Integrated exact candidate `674ad8896e9c7afa80b3fa531dfa46213eecf1b0` into main after final Opus 5.5 ACCEPT and downstream qualification. Base `d45267b` production source is identical to the prior Whisp pin `5e91b9e`. The fork feature branch was published and its exact remote revision verified before downstream builds. This closeout changes documentation only; Whisp keeps the tested candidate pin.
 
 ## Original loss and rejected v1
 
@@ -57,15 +55,16 @@ zero SIGSEGV 11, no distinct faults. Root's unchanged `d45267b` baseline has
 three such SIGTRAP failures in ten runs. Both isolated repaint attempts (one
 initial, one fixed post-classification run) also failed in this same path; these
 individual receipts remain failures despite the passing full and combined runs.
-No blink lifecycle fix was attempted. These small samples do not establish
-comparative crash rates or an exact cause. Native test reliability remains open.
+No production blink lifecycle fix was attempted. These small samples do not establish
+comparative crash rates; the fixture cause and named gate closure are documented below.
 
 Known limits: capture extent assumes sequential text/rendition/charset/OSC 8;
 explicit erase compatibility is tested without promising arbitrary cursor-control
 reconstruction. The pre-existing OSC 8 target lifetime bug is deferred; payload
 presence and rendering are tested, target survival is not fixed. Full-capacity
 repeat fetching and host/engine width differences remain separate. No physical
-input, human visual, installed-app or downstream compile acceptance is claimed.
+input, human visual or installed-app acceptance is claimed. Downstream compile
+qualification completed at closeout below.
 
 ## Reviewed fixture gate closure
 
@@ -92,3 +91,11 @@ retain their exact source identity; platform builds were not repeated for this
 macOS-only test annotation. No production blink thread-safety repair is claimed.
 The coordinator still owns downstream qualification and physical acceptance;
 no publication, main merge or re-pin occurred in this worker.
+
+## Coordinator integration and downstream qualification
+
+Final Opus 5.5 closure accepted exact `674ad88`, with production and UIKit hashes unchanged from accepted `420117d`. Whisp all four pins point at that published revision. Isolated WhispMac Debug, generic iOS Simulator Debug, and `make vision-build-check` pass; all three compiled checkouts match the exact candidate revision and Terminal.swift hash above. Full Whisp backend passes 4515 tests (7 skips), support tests 2770 XCTest plus 95 Swift Testing. Those suites exercise unchanged Whisp source trees; actual Xcode builds exercise the changed dependency.
+
+Durable downstream receipts and reviewer closure: `../ai-whisperer/docs/agent_memory/handoffs/2026-10-18-scrollback-wrap/` from the sibling checkout root. Local detailed reports remain under `../ai-whisperer/untracked/agent-work/2026-10-18-scrollback-wrap/`; private capture payloads are not committed. Final diff/scope audit is clean; canonical GitNexus comparison uses the d45267b baseline index and direct caller audit. The index becomes stale after integration; source/test/build receipts remain authoritative.
+
+The user must rebuild the iPad with the new pin and verify Real Cello reaches its initial login/Notification test A exchange. Production/external-beta publication remains held; no app relaunch, install, live-pane reset or release was performed during this repair. Branch state is removed after integration; retained worktrees and logs are not deleted.
