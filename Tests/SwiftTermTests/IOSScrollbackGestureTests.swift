@@ -211,6 +211,32 @@ final class IOSScrollbackGestureTests: XCTestCase {
         XCTAssertEqual(view.contentOffset.y, 2 * view.cellDimension.height, accuracy: 0.01)
     }
 
+    func testWrappedPrependPreservesPhysicalAnchorDuringDragCoastAndIdle() {
+        for phase in 0..<3 {
+            let (view, observer) = fixture()
+            drag(view, toRow: 2.25)
+            if phase > 0 { coast(view, toRow: 1.25) }
+            if phase == 2 {
+                view.simulatedDecelerating = false
+                view.scrollViewDidEndDecelerating(view)
+            }
+            let anchor = view.terminal.buffer.linesTop + view.terminal.buffer.yDisp
+            let offset = view.contentOffset.y
+            let visible = TerminalTestHarness.visibleLinesText(buffer: view.terminal.buffer, terminal: view.terminal)
+            observer.positions.removeAll()
+            // Each of ten joined lines occupies three physical rows at 58 cols.
+            let capture = Array(repeating: String(repeating: "x", count: 117), count: 10).joined(separator: "\r\n")
+            let inserted = view.prependScrollbackCapture(byteArray: Array(capture.utf8)[...])
+            XCTAssertEqual(inserted, 30)
+            XCTAssertEqual(view.terminal.buffer.linesTop + view.terminal.buffer.yDisp, anchor)
+            XCTAssertEqual(view.contentOffset.y, offset + 30 * view.cellDimension.height, accuracy: 0.01)
+            XCTAssertEqual(TerminalTestHarness.visibleLinesText(buffer: view.terminal.buffer, terminal: view.terminal), visible)
+            XCTAssertEqual(observer.positions.count, 1)
+            appendOutput(view)
+            XCTAssertEqual(view.contentOffset.y, offset + 30 * view.cellDimension.height, accuracy: 0.01)
+        }
+    }
+
     func testProgrammaticLayoutOffsetDoesNotEnterManualMode() {
         let (view, observer) = fixture()
         view.contentOffset.y = 3.25 * view.cellDimension.height

@@ -6843,14 +6843,12 @@ open class Terminal {
         changeScrollback(newScrollback)
     }
 
+    /// Prepends the newest physical rows of a sequential text/rendition capture
+    /// that fit in the remaining history capacity. The returned physical-row
+    /// count can exceed the capture's logical line count.
     @discardableResult
     public func prependScrollbackCapture(byteArray: ArraySlice<UInt8>, maximumScrollback: Int? = nil) -> Int {
         guard !byteArray.isEmpty, !isCurrentBufferAlternate else {
-            return 0
-        }
-
-        let rowCount = Self.countCapturedRows(in: byteArray)
-        guard rowCount > 0 else {
             return 0
         }
 
@@ -6865,11 +6863,21 @@ open class Terminal {
         }
 
         let parserDelegate = ScrollbackCaptureParserDelegate()
-        let parserOptions = TerminalOptions(cols: cols, rows: max(1, rowCount), scrollback: 0)
+        // A logical capture line can wrap into many physical rows. Retain its
+        // newest suffix in bounded scratch storage, using the live text options.
+        var parserOptions = options
+        parserOptions.cols = cols
+        parserOptions.rows = 1
+        parserOptions.scrollback = availableCapacity - 1
         let parserTerminal = Terminal(delegate: parserDelegate, options: parserOptions)
+        assert(parserTerminal.normalBuffer.lines.maxLength == availableCapacity)
         parserTerminal.feed(buffer: byteArray)
 
-        let parsedCount = min(rowCount, parserTerminal.normalBuffer.lines.count)
+        let parsedBuffer = parserTerminal.normalBuffer
+        assert(parsedBuffer.lines.count <= availableCapacity)
+        // Include the cursor's final row, even when a final newline left it
+        // blank. No unused viewport rows are included with a one-row viewport.
+        let parsedCount = min(parsedBuffer.yBase + parsedBuffer.y + 1, parsedBuffer.lines.count)
         guard parsedCount > 0 else {
             return 0
         }
@@ -6899,29 +6907,6 @@ open class Terminal {
         )
         refresh(startRow: 0, endRow: rows - 1)
         return insertedLines.count
-    }
-
-    private static func countCapturedRows(in byteArray: ArraySlice<UInt8>) -> Int {
-        guard !byteArray.isEmpty else {
-            return 0
-        }
-        var count = 1
-        var index = byteArray.startIndex
-        while index < byteArray.endIndex {
-            let byte = byteArray[index]
-            if byte == 13 {
-                let next = byteArray.index(after: index)
-                if next < byteArray.endIndex, byteArray[next] == 10 {
-                    count += 1
-                    index = byteArray.index(after: next)
-                    continue
-                }
-            } else if byte == 10 {
-                count += 1
-            }
-            index = byteArray.index(after: index)
-        }
-        return count
     }
 
     private func remapCapturedLine(_ sourceLine: BufferLine, from sourceTerminal: Terminal) -> BufferLine {
