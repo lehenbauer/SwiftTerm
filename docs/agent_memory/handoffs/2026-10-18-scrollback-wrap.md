@@ -1,54 +1,68 @@
 # Wrapped scrollback capture retention
 
 Branch `fix/scrollback-wrap`, based on docs-current `d45267b` (production
-source identical to `5e91b9e`). Integration and downstream builds remain with
-the coordinator; this worker did not push, merge to main or change pins.
+source identical to `5e91b9e`). No push, main merge or downstream pin change.
+The coordinator owns fresh final review and downstream qualification.
 
-`Terminal.prependScrollbackCapture` used logical newline count both to size a
+## Original loss and rejected v1
+
+The old `prependScrollbackCapture` used logical newline count both to size a
 zero-history scratch viewport and to cap extraction. Wrapped overflow recycled
-the earliest rows before insertion even when destination history had space.
-The repair copies live `TerminalOptions`, overrides geometry to one row at the
-current columns and history to remaining capacity minus one, then extracts
-through `yBase + y + 1` bounded by stored rows. Final blank rows remain real.
+the earliest physical rows even with destination capacity available.
 
-Scratch storage is bounded by destination free capacity. Debug assertions check
-scratch `maxLength` and populated count; an 80,000-character joined-line test
-exercises capacity two. Capacity truncation intentionally retains the newest
-physical suffix, including an initial wrapped continuation. Return values count
-physical inserted rows and can exceed the number of logical capture lines.
-Existing insertion, live-row identities, selection translation and viewport
-bookkeeping are unchanged.
+V1 `6a37554` retained the rows with bounded one-row scratch storage, but final
+Opus review rejected its implicit background padding (B1): newly scrolled rows
+received active BCE color where tmux and the old parser retain default null
+padding. The v1 bottom-row oracle adjustment hid that regression. V1's commit,
+original failure receipts and report are preserved; its passing tests are not
+acceptance. This record supersedes the earlier v1 handoff's acceptance wording.
 
-Synthetic regressions compare resolved characters, widths, all `Attribute`
-fields, payload presence and wrap flags against ordinary feed in a spacious
-multi-row terminal. The reference starts at the bottom row so continued rows
-receive the normal scroll-time erase background, rather than the background of
-preallocated initial viewport blanks. No cell comparison excludes blank cells.
-Coverage includes Unicode, charset, SGR, OSC 8 rendering, inherited regional
-indicator/tab/EOL options, blank/trailing/exact-width rows, bounded suffixes,
-repeated prepends, selection and parked viewport, and reflow after truncation.
+## B1 correction
 
-Validation: exact old production source fails the final 12 hydration tests with
-30 issues; the candidate passes those same tests. Both private captures match
-all cells and wraps at six widths and retain the original prefix with ample
-capacity. Focused selection (17 XCTest), repaint (12 Swift Testing), Mac press
-anchor (35 Swift Testing) and upstream buffer integration gates pass. Full
-`swift test --no-parallel`: 85 XCTest + 910 Swift Testing tests pass;
-`swift build` and `git diff --check` pass. iOS 26.4 simulator executes 13 UIKit
-scrollback gesture tests plus 12 hydration tests successfully, including a new
-wrapped-prepend test covering drag, coast and idle through the public view API.
+Keep the one-row scratch, history `availableCapacity - 1`, inherited live text
+options, and populated extent `yBase + y + 1` bounded by stored rows. A private
+flag defaults false and is enabled only on the temporary capture parser. It
+selects default attributes for implicit scroll row construction, cache matching
+and recycling. Ordinary terminal scrolling and all explicit erases retain BCE.
+There is no new public API or option.
 
-The first combined focused macOS run crashed in the main-queue text-blink
-callback (`visibleBlinkRows` reading `CircularBufferLineList`); the isolated
-repaint gate and subsequent full suite pass. No unrelated lifecycle repair was
-attempted. The iOS 26.5 launch failed at SimLaunchHostService; the installed
-26.4 runtime successfully runs the tests. These original failures are retained
-in the coordinator's implementation receipts.
+Restore a fresh tall oracle starting at row zero, with enough rows for every
+input byte plus one and no history. Assert `yBase == 0` and no trimming. Compare
+every cell, including null padding: resolved characters, widths, full attributes,
+payload presence and wrap flags. The fixed tmux-shaped padding regression is
+old-green / v1-red (six issues) / corrected-green with identical test code.
+Indexed and RGB padding, explicit colored spaces/EL/ED/ECH/ICH/DCH, capacity-one
+recycling, wraps and normal-live BCE controls pass. All original content,
+selection, cursor, identity, viewport, reflow and option checks remain.
 
-Known limits: capture extent assumes sequential text/rendition/charset/OSC 8,
-not arbitrary cursor-moving captures. The pre-existing OSC 8 payload lifetime
-bug is explicitly deferred: visible text/rendition and payload presence are
-covered, hydrated link target survival is not fixed. Capacity-full repeated
-zero-insert fetching and host/engine Unicode-width differences remain separate.
-Simulator/native state tests do not establish physical-device or human visual
-acceptance. Fresh final review and downstream compile gates remain outstanding.
+Capacity intentionally retains the newest physical suffix, including an initial
+wrapped continuation. Returned counts are physical rows and may exceed logical
+line count. Scratch maxLength/populated-count assertions and the 80,000-character
+joined-line test bound storage. Both private captures match the fresh tall
+oracle at six widths, including all cell attributes and the original prefix.
+
+## Validation and known native test failure
+
+Focused hydration: 16 Swift Testing functions pass. Selection: 17 XCTest pass;
+Mac selection anchor: 35 Swift Testing pass; upstream integration filter:
+12 Swift Testing tests in two suites pass. Actual iOS 26.4 simulator:
+13 UIKit gesture tests and 16 hydration functions pass. `swift build`,
+`git diff --check` and full `swift test --no-parallel` pass (85 XCTest +
+914 Swift Testing tests in 81 suites, including all repaint tests).
+
+The ten bounded combined-filter runs were completed without retrying failed
+rounds: nine pass, one SIGTRAP 5 in the pre-existing main-queue
+`CircularBufferLineList -> visibleBlinkRows -> updateTextBlinkLifecycle` path;
+zero SIGSEGV 11, no distinct faults. Root's unchanged `d45267b` baseline has
+three such SIGTRAP failures in ten runs. Both isolated repaint attempts (one
+initial, one fixed post-classification run) also failed in this same path; these
+individual receipts remain failures despite the passing full and combined runs.
+No blink lifecycle fix was attempted. These small samples do not establish
+comparative crash rates or an exact cause. Native test reliability remains open.
+
+Known limits: capture extent assumes sequential text/rendition/charset/OSC 8;
+explicit erase compatibility is tested without promising arbitrary cursor-control
+reconstruction. The pre-existing OSC 8 target lifetime bug is deferred; payload
+presence and rendering are tested, target survival is not fixed. Full-capacity
+repeat fetching and host/engine width differences remain separate. No physical
+input, human visual, installed-app or downstream compile acceptance is claimed.

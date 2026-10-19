@@ -1,6 +1,7 @@
 # Branch state: fix/scrollback-wrap
 
-- Repairs physical wrapped-row retention in `prependScrollbackCapture` with scratch storage bounded by destination free capacity; based on `d45267b`.
-- Exact-source red/green, six-width private corroboration, focused tests, full package tests (85 XCTest + 910 Swift Testing), build and actual iOS 26.4 UIKit/hydration tests pass; see [handoff](../../../handoffs/2026-10-18-scrollback-wrap.md).
-- OSC 8 target lifetime and full-capacity repeat fetching remain explicitly deferred; no physical-device/visual acceptance.
-- Not pushed, merged to main or re-pinned; coordinator owns final review and downstream integration.
+- V1 `6a37554` is preserved but rejected for B1 background padding; its bottom-row oracle hid the regression and is superseded by the fresh tall non-scrolling oracle.
+- Corrected candidate retains bounded physical rows and uses default implicit row attributes only in the private capture parser; explicit erases and live BCE stay unchanged. Old/v1/new padding gate is green/red/green.
+- Hydration/private matrix/iOS 26.4/build/full suite (85 XCTest + 914 Swift Testing) pass; ten combined native runs have nine passes and one known-path SIGTRAP. Both isolated repaint runs fail in that baseline path; see [handoff](../../../handoffs/2026-10-18-scrollback-wrap.md).
+- OSC 8 target lifetime, native blink test reliability and full-capacity repeat fetching remain open; no physical-device/visual acceptance.
+- Not pushed, merged to main or re-pinned; coordinator owns fresh review and downstream qualification.

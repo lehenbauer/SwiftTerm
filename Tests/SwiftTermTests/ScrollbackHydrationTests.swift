@@ -28,7 +28,7 @@ struct ScrollbackHydrationTests {
         }
     }
 
-    /// Ordinary feed with a spacious, multi-row viewport is independent of
+    /// Ordinary feed with a tall, non-scrolling viewport is independent of
     /// prepend's scratch storage and extraction. Captures are sequential text,
     /// rendition and charset data, rather than arbitrary cursor controls.
     @discardableResult
@@ -36,17 +36,14 @@ struct ScrollbackHydrationTests {
                               options: TerminalOptions = TerminalOptions(cols: 8)) -> Int {
         let delegate = TerminalTestDelegate()
         var referenceOptions = options
-        referenceOptions.rows = 17
-        referenceOptions.scrollback = 10_000
+        referenceOptions.rows = capture.utf8.count + 1
+        referenceOptions.scrollback = 0
         let reference = Terminal(delegate: delegate, options: referenceOptions)
-        // Start on the bottom row so continuation rows are created by normal
-        // scrolling with the current erase background, rather than using the
-        // viewport's initially blank rows (which predate any captured SGR).
-        reference.feed(text: "\u{1b}[17;1H")
         reference.feed(text: capture)
-        let physicalCount = reference.buffer.yBase + reference.buffer.y + 1 - 16
+        let physicalCount = reference.buffer.y + 1
+        #expect(reference.buffer.yBase == 0)
         #expect(reference.buffer.totalLinesTrimmed == 0)
-        let expected = snapshot(reference, start: 16, count: physicalCount)
+        let expected = snapshot(reference, count: physicalCount)
 
         var liveOptions = options
         liveOptions.rows = 3
@@ -105,6 +102,59 @@ struct ScrollbackHydrationTests {
     @Test(arguments: ["short", "one\r\ntwo", "one\r\ntwo\r\n", "\r\n\r\n", "one\n\ntwo\n"])
     func nonwrappingAndBlankControls(capture: String) {
         checkCapture(capture)
+    }
+
+    @Test func capturePaddingMatchesTmux() {
+        // tmux's full-cell capture resets the padding after BOTH abc and def
+        // to default background, although its joined capture keeps SGR active.
+        let capture = "\u{1b}[48;5;42mabc\r\ndef\u{1b}[49m\r\nend"
+        checkCapture(capture)
+        let (terminal, delegate) = TerminalTestHarness.makeTerminal(cols: 8, rows: 3, scrollback: 10)
+        #expect(terminal.prependScrollbackCapture(byteArray: Array(capture.utf8)[...]) == 3)
+        for row in 0..<2 {
+            for col in 0..<3 {
+                #expect(terminal.buffer.lines[row][col].attribute.bg == .ansi256(code: 42))
+            }
+            for col in 3..<8 {
+                #expect(terminal.buffer.lines[row][col].code == 0)
+                #expect(terminal.buffer.lines[row][col].attribute == CharData.defaultAttr)
+            }
+        }
+        withExtendedLifetime(delegate) {}
+    }
+
+    @Test(arguments: [1, 2, 3])
+    func capturePaddingAfterRecycleAndWrap(capacity: Int) {
+        checkCapture("\u{1b}[48;5;42mabc\r\ndef\u{1b}[49m", capacity: capacity)
+        checkCapture("\u{1b}[48;2;12;34;56mabc\r\n12345678q\u{1b}[49m", capacity: capacity)
+    }
+
+    @Test(arguments: [
+        "\u{1b}[48;5;42mabc  \r\ndef  \u{1b}[49m", // explicit colored spaces
+        "\u{1b}[48;2;12;34;56mabc\r\ndef  \u{1b}[49m", // RGB spaces vs nulls
+        "\u{1b}[48;5;42mabc\r\ndef\u{1b}[K", // EL
+        "\u{1b}[48;5;42mabc\r\ndef\u{1b}[J", // ED
+        "\u{1b}[48;5;42mabc\r\ndef\u{1b}[2X", // ECH
+        "\u{1b}[48;5;42mabc\r\ndef\u{1b}[2@x", // ICH
+        "\u{1b}[48;5;42mabc\r\ndefghi\u{1b}[3D\u{1b}[2P" // DCH
+    ])
+    func explicitColoredSpacesAndErasesKeepRendition(capture: String) {
+        checkCapture(capture, capacity: 1) // recycle before explicit erase
+        checkCapture(capture, capacity: 10)
+    }
+
+    @Test(arguments: [0, 1, 10])
+    func normalLiveScrollingKeepsEraseBackground(scrollback: Int) {
+        let (terminal, delegate) = TerminalTestHarness.makeTerminal(cols: 8, rows: 1, scrollback: scrollback)
+        terminal.feed(text: "\u{1b}[48;5;42mabc\r\ndef")
+        #expect(terminal.buffer.lines[terminal.buffer.yBase][5].attribute.bg == .ansi256(code: 42))
+        // Change color after the blank-line cache has been used, then recycle
+        // at small capacities. Ordinary terminals must retain normal live BCE.
+        terminal.feed(text: "\u{1b}[48;2;12;34;56m\r\nghi\r\nj")
+        #expect(terminal.buffer.lines[terminal.buffer.yBase][5].attribute.bg == .trueColor(red: 12, green: 34, blue: 56))
+        terminal.feed(text: "\u{1b}[49m\r\nk")
+        #expect(terminal.buffer.lines[terminal.buffer.yBase][5].attribute.bg == CharData.defaultAttr.bg)
+        withExtendedLifetime(delegate) {}
     }
 
     @Test(arguments: [0, 1, 2, 3, 4, 10])

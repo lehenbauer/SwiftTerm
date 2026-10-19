@@ -6511,6 +6511,9 @@ open class Terminal {
     }
     
     var blankLine: BufferLine = BufferLine(cols: 0)
+    // Only capture reconstruction uses fresh-viewport padding on implicit rows.
+    // Explicit erases still use eraseAttr(), as do all ordinary terminals.
+    private var captureParserUsesDefaultRowAttributes = false
     
     /// Flag the scrolled region dirty. The CoreGraphics renderer now clears any
     /// dirtied region before painting (see AppleTerminalView), so flagging just
@@ -6540,9 +6543,10 @@ open class Terminal {
             newLineState = currentBidiState
         }
 
+        let newLineAttribute = captureParserUsesDefaultRowAttributes ? CharData.defaultAttr : eraseAttr()
         var newLine = blankLine
-        if newLine.count != cols || newLine [0].attribute != eraseAttr () {
-            newLine = buffer.getBlankLine (attribute: eraseAttr (), isWrapped: isWrapped)
+        if newLine.count != cols || newLine [0].attribute != newLineAttribute {
+            newLine = buffer.getBlankLine (attribute: newLineAttribute, isWrapped: isWrapped)
             blankLine = newLine
         }
         newLine.isWrapped = isWrapped
@@ -6597,7 +6601,7 @@ open class Terminal {
             // Insert the line using the fastest method
             if bottomRow == lines.count - 1 {
                 if willBufferBeTrimmed {
-                    lines.recycle (clearAttribute: eraseAttr())
+                    lines.recycle (clearAttribute: newLineAttribute)
                     lines[lines.count - 1].isWrapped = isWrapped
                     lines[lines.count - 1].bidiState = newLineState
                 } else {
@@ -6870,6 +6874,7 @@ open class Terminal {
         parserOptions.rows = 1
         parserOptions.scrollback = availableCapacity - 1
         let parserTerminal = Terminal(delegate: parserDelegate, options: parserOptions)
+        parserTerminal.captureParserUsesDefaultRowAttributes = true
         assert(parserTerminal.normalBuffer.lines.maxLength == availableCapacity)
         parserTerminal.feed(buffer: byteArray)
 
