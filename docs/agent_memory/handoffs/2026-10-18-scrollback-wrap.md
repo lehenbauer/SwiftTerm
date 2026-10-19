@@ -66,3 +66,29 @@ reconstruction. The pre-existing OSC 8 target lifetime bug is deferred; payload
 presence and rendering are tested, target survival is not fixed. Full-capacity
 repeat fetching and host/engine width differences remain separate. No physical
 input, human visual, installed-app or downstream compile acceptance is claimed.
+
+## Reviewed fixture gate closure
+
+Opus accepted production `420117d` and identified the repaint fixture race:
+the unisolated Swift Testing suite mutates AppKit views/buffers off-main while
+`updateTextBlinkLifecycle` dispatches a reader onto main. That reader can use
+bounds invalidated by concurrent fixture mutation. The reviewed test-only fix
+adds `@MainActor` to `ScrollbackRepaintTests`, without assertion or production
+changes, so fixture mutation and the blink reader share main-actor isolation.
+This closes the previously red repaint gate; the historical failures above and
+the prior reports remain preserved as failures, not retroactively reclassified.
+
+Fixed-count validation after annotation: candidate 5/5 isolated invocations pass
+and old `d45267b` plus the identical annotation 5/5 pass (12 tests each). The
+root-owned baseline fixture was restored byte-for-byte in `finally` and its
+worktree is clean. The single combined filter passes (17 XCTest + 75 Swift
+Testing tests in five suites), and the single full `swift test --no-parallel`
+passes (85 XCTest + 914 Swift Testing in 81 suites). No gate failed or retried.
+
+Production `Terminal.swift` remains SHA-256
+`d781218b3c727a6bd1ac2abe7fe405cad73b7cc6b13e9a77dde2e2939d6dd392`;
+UIKit test source is unchanged from `420117d`. Prior private matrix and iOS gates
+retain their exact source identity; platform builds were not repeated for this
+macOS-only test annotation. No production blink thread-safety repair is claimed.
+The coordinator still owns downstream qualification and physical acceptance;
+no publication, main merge or re-pin occurred in this worker.
