@@ -7,7 +7,7 @@ Bounded snapshot of what is true now. History and narrative live in
 
 - `main` includes adopted upstream v1.19.0, Mac selection `5e91b9e`, and wrapped scrollback retention `674ad88`. Exact downstream pin remains `674ad8896e9c7afa80b3fa531dfa46213eecf1b0`; later closeout changes are documentation only.
 - v1.19.0 adoption is complete and published; no runtime deployment/relaunch; human visual and physical-keyboard acceptance unclaimed — `handoffs/2026-09-29-upstream-v1.19.0-adoption.md`.
-- Whisp integration qualifies all four pins at `674ad88`: Mac/iOS Simulator/visionOS builds pass with checkout revision and Terminal.swift hash verified; full Whisp support/backend suites pass. Physical iPad acceptance remains pending — `handoffs/2026-10-18-scrollback-wrap.md`.
+- Whisp integration qualifies all four pins at `674ad88`: Mac/iOS Simulator/visionOS builds pass with checkout revision and Terminal.swift hash verified; full Whisp support/backend suites pass. Karl confirmed rebuilt iPad Real Cello scrolls all the way to the top; reported cutoff field accepted — `handoffs/2026-10-18-scrollback-wrap.md`.
 - A v1.19 re-pin requires Whisp's OSC 133 mirror override (ai-whisperer `77b1d871`, branch `probe/swiftterm-v1.19.0`) — `handoffs/2026-09-29-upstream-v1.19.0.md`.
 - Upstream v1.19.0 is `464df52` (merged at `f17a40f`); the prior sync was `cf7764f` (via `affe8412`) — `handoffs/2026-08-08-upstream-sync-cf7764f.md`.
 
