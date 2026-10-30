@@ -1552,22 +1552,22 @@ extension TerminalView {
             feedBytes: { bytes in
                 signal.markDirty()
                 let parse = Profiling.begin(.ioParse, "bytes=%d", bytes.count)
-                _ = owner.feed(bytes: bytes[...])
+                let synchronizedOutputActive = owner.feed(bytes: bytes[...])
                 parse.end()
                 diagnosticsState.withLock { diagnostics in
                     diagnostics.bytesFed += bytes.count
                     diagnostics.batches += 1
                 }
-                signal.markDirty()
+                owner.scheduleFrameAfterFeed(synchronizedOutputActive, signal: signal)
             },
             feedText: { text in
                 signal.markDirty()
-                _ = owner.feed(text: text)
+                let synchronizedOutputActive = owner.feed(text: text)
                 diagnosticsState.withLock { diagnostics in
                     diagnostics.bytesFed += text.utf8.count
                     diagnostics.batches += 1
                 }
-                signal.markDirty()
+                owner.scheduleFrameAfterFeed(synchronizedOutputActive, signal: signal)
             })
     }
 
@@ -4988,6 +4988,7 @@ extension TerminalView {
     /// holding the terminal lock. Deliver after leaving that lock; calling
     /// send(data:) here would register twice and attempt to take it again.
     public nonisolated func sendUserInput(source: Terminal, data: ArraySlice<UInt8>) {
+        renderOwner.recordUserInputForDisplay()
         inputSender.sendRegistered(data: data)
     }
     

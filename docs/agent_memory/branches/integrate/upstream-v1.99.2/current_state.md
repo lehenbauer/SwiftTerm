@@ -74,6 +74,28 @@ once globally relevant facts are promoted to `current_state.md`/`decisions.md`.
 | Root probes | Mirror policy, history prepare, Kitty deferred reply and paste FIFO: Whisp shared dir `root-probes/run.log`, `paste-order-new.log`. |
 | Whisp client | Snapshot-5 Mac build reported by the coordinator; see `REPORT-client.md`. |
 
+## Interactive echo window restoration
+
+The first benchmark exposed an omitted fork policy: baseline `feedFinish` rendered
+immediately for output within150ms of user input. The snapshot feed path had only
+marked dirty, so an already-running display link deferred echo until vsync.
+The owner now records user input with a checked timestamp and publishes a coalesced
+immediate frame after parsing only inside that window, when visible and outside
+DEC2026. Keyboard and core paste paths record without duplicate registration. Both
+view feed overloads and checked LocalProcess byte/borrowed feeds use the policy.
+
+- Full Mac:2102 Swift Testing/205 suites plus146 XCTest pass (`echo-full.log`).
+- Full iOS:1062 Swift Testing/95 suites plus57 XCTest pass (`echo-ios-test.log`).
+- Vision library builds (`echo-vision.log`).
+- A subsequent fourth test exercises actual keyboard/paste and byte/text feed
+  wiring without a display-link tick. Mac focused4/4 pass (`echo-wiring.log`);
+  focused UIKit and independent mutation proof are being collected.
+- Native diagnostic echo draw-completion median0.299ms/p99 0.376ms,0misses
+  (`performance/runs/diag1-diag-echo1-echo-typed.log` in the shared Whisp artifacts).
+  This is causal sanity, not final quiet-paired timing or glass latency.
+- Review requires input-then-flood performance and explicit Metal main-hop limits.
+  The hidden-terminal guard is included; final paired qualification remains open.
+
 ## Remaining before main / re-pin
 - **Clean-identity downstream:**
   - publish the exact committed revision;

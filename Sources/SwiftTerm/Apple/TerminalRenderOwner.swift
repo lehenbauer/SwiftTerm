@@ -164,6 +164,7 @@ private struct PendingSynchronizedOutputWatchdogUpdate: Sendable {
 /// -> TerminalLock`.
 final class TerminalRenderOwner: Sendable {
     let cursorRenderingPolicy = Locked(CursorRenderingPolicy())
+    private let lastUserInputUptimeNs = Locked<UInt64?>(nil)
     let mailbox = TerminalRenderMailbox()
     let synchronizedOutputWatchdog = SynchronizedOutputWatchdog()
     private let session = Locked<TerminalRenderSession?>(nil)
@@ -207,6 +208,7 @@ final class TerminalRenderOwner: Sendable {
         }
         if retired.map({ $0.terminal !== terminal }) ?? true {
             pendingSynchronizedOutputWatchdogUpdate.withLock { $0 = nil }
+            lastUserInputUptimeNs.withLock { $0 = nil }
         }
         synchronizedOutputWatchdog.attach(terminal: terminal)
         let visibility = publishedVisibility.withLock { $0 }
@@ -299,6 +301,37 @@ final class TerminalRenderOwner: Sendable {
         return result.active
     }
 
+    /// Preserve the fork's 150 ms input-to-echo display window without
+    /// retaining a view or drawing while the parser owns TerminalLock.
+    func recordUserInputForDisplay(at now: UInt64 = DispatchTime.now().uptimeNanoseconds) {
+        lastUserInputUptimeNs.withLock { $0 = now }
+    }
+
+    func shouldDisplayImmediatelyAfterUserInput(
+        synchronizedOutputActive: Bool,
+        now: UInt64 = DispatchTime.now().uptimeNanoseconds
+    ) -> Bool {
+        guard !synchronizedOutputActive,
+              let last = lastUserInputUptimeNs.withLock({ $0 }), now >= last else { return false }
+        return now - last <= 150_000_000
+    }
+
+    /// The signal coalesces bursts and delivers outside the terminal lock.
+    /// Normal output retains display-link pacing; DEC 2026 stays frozen.
+    func scheduleFrameAfterFeed(
+        _ synchronizedOutputActive: Bool?, signal: FrameDriverSignal,
+        now: UInt64 = DispatchTime.now().uptimeNanoseconds
+    ) {
+        if publishedVisibility.withLock({ $0 }) != .notVisible,
+           let synchronizedOutputActive,
+           shouldDisplayImmediatelyAfterUserInput(
+               synchronizedOutputActive: synchronizedOutputActive, now: now) {
+            signal.requestImmediateTick()
+        } else {
+            signal.markDirty()
+        }
+    }
+
     /// Registers user input under the same owner and terminal locks as feed.
     func registerUserInput(_ bytes: [UInt8]) {
         guard let terminal = currentSession()?.terminal else { return }
@@ -307,6 +340,7 @@ final class TerminalRenderOwner: Sendable {
         terminal.terminalLock.withLock {
             terminal.registerUserInput(bytes[...])
         }
+        recordUserInputForDisplay()
     }
 
     func mouseEventBytes(button: Int, release: Bool, motion: Bool, shift: Bool, meta: Bool,
