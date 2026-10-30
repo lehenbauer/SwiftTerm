@@ -147,3 +147,34 @@ Earlier HOLD record at 060f8a4 (history benchmark +77% main CPU, 21.87ms worst
 iteration) and archived receipts:
 `/Users/karl/src/ai-whisperer-feature-swiftterm-v1.99.2/docs/agent_memory/handoffs/2026-10-30-swiftterm-v1992/README.md`.
 Retain worktrees and artifacts.
+
+## Publication and retention constraints
+
+The coordinator may publish this verified feature branch for exact-revision
+Whisp developer pins. Do not merge either repository to main in this task.
+Never rewrite or delete `integrate/upstream-v1.99.2` while any Whisp ref pins
+one of its commits; a fresh remote clone must retain access to each pinned SHA.
+Whisp's Mac release gate still requires fork-main ancestry and is not waived.
+Developer qualification is separate from release eligibility and live activation.
+
+## Final source qualification and adoption decision
+
+At 45b58d4 (Sources 17e363d4), the full downstream Mac/iOS/Vision builds and
+assigned Mac native fixtures pass. The final CG benchmark passes 24 correctness
+runs, 24 warm-ups and 72 retained timing cells, all timing cells compiler-clear.
+The coordinator accepts feature-branch developer adoption under the user's
+resumed direction; no additional optimization is planned.
+
+Within this session, bulk main CPU falls about 71–90%. History scrolling costs
+an extra 0.29 ms/step (+38.9%); steady-view CPU adds 1.3–9.0 ms/s depending on
+workload. These costs are accepted for developer qualification, not eliminated.
+All 240 history steps draw, with no over-frame history iteration. General
+responsiveness, energy and many-pane heavy-build behavior remain unproven.
+
+Evidence and root adjudication are retained in the Whisp sibling's
+`untracked/agent-work/2026-10-30-swiftterm-v1992/resume/`:
+`REPORT-fork-qualify.md`, `REPORT-client-qualify.md`,
+`REPORT-final-performance.md`, and `RESUMPTION-DECISION.md`.
+Publication and the four Whisp pins follow this source qualification; ordinary
+remote-resolved downstream builds must still pass. These final sections
+supersede earlier pending/HOLD descriptions above without erasing their history.
