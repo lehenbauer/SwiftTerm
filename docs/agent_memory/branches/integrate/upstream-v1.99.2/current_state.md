@@ -89,14 +89,16 @@ view feed overloads and checked LocalProcess byte/borrowed feeds use the policy.
 - Vision library builds (`echo-vision.log`).
 - A subsequent fourth test exercises actual keyboard/paste and byte/text feed
   wiring without a display-link tick. Mac focused4/4 pass (`echo-wiring.log`);
-  focused UIKit and independent mutation proof are being collected.
+  focused UIKit4/4 and independent mutation proofs also pass (feed wiring and
+  hidden-visibility guard mutations each fail the corresponding regression).
 - Native diagnostic echo draw-completion median0.299ms/p99 0.376ms,0misses
   (`performance/runs/diag1-diag-echo1-echo-typed.log` in the shared Whisp artifacts).
   This is causal sanity, not final quiet-paired timing or glass latency.
-- Review requires input-then-flood performance and explicit Metal main-hop limits.
-  The hidden-terminal guard is included; final paired qualification remains open.
+- Input-then-flood diagnostic remains faster than shipping. Bounded Metal
+  diagnostic shows no added main hops; it is not Metal product qualification.
+  Full final paired qualification is held at the history-scroll regression.
 
-## Remaining before main / re-pin
+## Held adoption / remaining gates
 - **Clean-identity downstream:**
   - publish the exact committed revision;
   - re-pin all four Whisp product/probe pins with the manifest and lockfile together;
@@ -107,3 +109,28 @@ view feed overloads and checked LocalProcess byte/borrowed feeds use the policy.
   - The keystroke that *starts* an IME composition is taken by the printable repeat path (unchanged fork behavior; needs a device or real IME check).
   - The Mac observer `deinit` cleanup is verified by compile and suite only.
   - Hosted XCTest `WhispMacClipboardTests` was not run (it launches the app).
+
+## Final disposition (2026-10-30)
+
+HOLD. The user explicitly prohibits merging either repository to main and says
+to wait if slower. No source push, main integration, product pin advance or
+activation occurred. The qualified source remains060f8a4 (Sources tree
+64c5b012673efcfe8d89396793259d51c68cfabc); this closing update is documentation only.
+
+Exact clean-source Whisp Mac/iOS/Vision builds and native fixtures pass. The
+060f8a4 history benchmark regresses main CPU by77% versus shipping674ad88, with
+a21.87ms worst iteration. The separate experimental branch
+`experiment/scrollbar-frame-coalescing-v1992` in
+`/Users/karl/src/SwiftTerm-scrollbar-v1992` fixes legacy chrome drawn by the
+transparent overlay target (49595b0) and redundant indicator repaint (4d68c80).
+Its316 Swift Testing +28 total XCTest pass, and3quietpaired timing runs eliminate
+over-frame stalls in the workload but still cost529ms vs440ms main CPU (+20.2%).
+Every candidate run exceeds every baseline run. Bulk feed is about89% faster
+but does not waive the user's scrollback CPU gate. No further optimization or
+full12-workload final pair was authorized after this result. Experimental fixes
+remain separate and lack full-suite/app/visual qualification.
+
+Durable closeout and archived benchmark source/receipts:
+`/Users/karl/src/ai-whisperer-feature-swiftterm-v1.99.2/docs/agent_memory/handoffs/2026-10-30-swiftterm-v1992/README.md`.
+All workers retired; dedicated iOS simulator shut down. Retain worktrees and
+artifacts. Primary-checkout dirty files remain byte-for-byte unchanged.
