@@ -79,9 +79,21 @@ private final class OverlayScrollerIndicator: NSView {
     override var isOpaque: Bool { false }
     override var isFlipped: Bool { true }
 
+    /// The knob the last draw painted.
+    private var drawnKnob: NSRect?
+
+    /// Marks the indicator for display when the scroller's knob moved since
+    /// the last draw.
+    func invalidateIfKnobMoved() {
+        if scroller?.rect(for: .knob) != drawnKnob {
+            needsDisplay = true
+        }
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         NSGraphicsContext.current?.cgContext.clear(bounds)
-        guard let knob = scroller?.rect(for: .knob), !knob.isEmpty else { return }
+        drawnKnob = scroller?.rect(for: .knob)
+        guard let knob = drawnKnob, !knob.isEmpty else { return }
         NSColor.labelColor.withAlphaComponent(0.55).setFill()
         NSBezierPath(roundedRect: knob, xRadius: knob.width / 2, yRadius: knob.width / 2).fill()
     }
@@ -1979,7 +1991,7 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
         scroller.isEnabled = state.isEnabled
         scroller.doubleValue = state.doubleValue
         scroller.knobProportion = state.knobProportion
-        overlayScrollerIndicator.needsDisplay = true
+        overlayScrollerIndicator.invalidateIfKnobMoved()
         if !state.isEnabled, scrollerStyle == .overlay {
             hideOverlayScroller(animated: false)
         }
@@ -1992,11 +2004,16 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
         overlayScrollerFadeGeneration += 1
         scroller.isHidden = false
         scroller.alphaValue = 0
-        scroller.needsDisplay = true
+        // The knob paints in the next display pass. A wheel scroll moves it
+        // when the frame applies the new position; a knob drag has already
+        // moved the scroller's value.
+        if overlayScrollerIndicator.isHidden {
+            overlayScrollerIndicator.needsDisplay = true
+        } else {
+            overlayScrollerIndicator.invalidateIfKnobMoved()
+        }
         overlayScrollerIndicator.isHidden = false
         overlayScrollerIndicator.alphaValue = 1
-        overlayScrollerIndicator.needsDisplay = true
-        overlayScrollerIndicator.displayIfNeeded()
         guard !overlayScrollerIsTracking else { return }
         overlayScrollerHideTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) {
             [weak self] _ in

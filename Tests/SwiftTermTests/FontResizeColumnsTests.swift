@@ -99,6 +99,57 @@ struct FontResizeColumnsTests {
         #expect(try paintedPixels(.overlay) == 0)
     }
 
+    /// The indicator repaints in the display pass, not synchronously, and
+    /// only when its knob moved.
+    @Test func testOverlayIndicatorRepaintsOnlyWhenKnobMoves() throws {
+        let frame = CGRect(x: 0, y: 0, width: 400, height: 200)
+        let window = NSWindow(contentRect: frame, styleMask: [.titled],
+                              backing: .buffered, defer: false)
+        let view = TerminalView(frame: frame)
+        view.followsSystemScrollerStyle = false
+        view.scrollerStyle = .overlay
+        window.contentView = view
+        view.layoutSubtreeIfNeeded()
+        let scroller = try #require(view.subviews.compactMap { $0 as? NSScroller }.first)
+        let indicator = try #require(view.subviews.first {
+            $0.identifier?.rawValue == "SwiftTermOverlayScrollerIndicator"
+        })
+        // A layer-backed view reports invalidation through its layer.
+        func pendingPaint() -> Bool { indicator.layer?.needsDisplay() ?? false }
+        let state = TerminalView.ScrollerState(isEnabled: true, doubleValue: 0.5, knobProportion: 0.2)
+
+        view.applyScrollerState(state)
+        view.showOverlayScroller()
+        #expect(pendingPaint(), "the reveal paints in the display pass")
+        indicator.displayIfNeeded()
+        #expect(!pendingPaint())
+
+        view.applyScrollerState(state)
+        #expect(!pendingPaint(), "an unchanged knob needs no repaint")
+        view.showOverlayScroller()
+        #expect(!pendingPaint(), "a visible, unchanged knob needs no repaint")
+
+        // Wheel scroll: the frame applies the new position.
+        view.applyScrollerState(.init(isEnabled: true, doubleValue: 0.25, knobProportion: 0.2))
+        #expect(pendingPaint())
+        indicator.displayIfNeeded()
+
+        // Knob drag: the scroller moves its value before its action scrolls the view.
+        scroller.doubleValue = 0.75
+        view.showOverlayScroller()
+        #expect(pendingPaint())
+        indicator.displayIfNeeded()
+
+        // Disabling hides the indicator; the next reveal repaints it.
+        view.applyScrollerState(.init(isEnabled: false, doubleValue: 0.75, knobProportion: 0.2))
+        #expect(indicator.isHidden)
+        indicator.displayIfNeeded()
+        view.applyScrollerState(state)
+        view.showOverlayScroller()
+        #expect(!indicator.isHidden)
+        #expect(pendingPaint())
+    }
+
     @Test func testScrollerUsesTerminalScrollPositionDirectly() {
         let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 400, height: 200))
         let scroller = view.subviews.compactMap { $0 as? NSScroller }.first
