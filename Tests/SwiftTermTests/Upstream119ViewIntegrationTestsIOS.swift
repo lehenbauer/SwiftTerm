@@ -91,19 +91,29 @@ final class Upstream119ViewIntegrationTestsIOS {
     /// DECSCNM across a switch between differing translucent themes: while
     /// still reversed, the swapped foreground must already be the new theme's
     /// background; reverse-off must land on the new theme's background + alpha.
-    @Test func reverseScreenAcrossThemeSwitchRestoresNewThemeBackground() {
+    /// Runs main-queue work the terminal callbacks queued (`onMain`).
+    private func drainMainQueue() async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+    }
+
+    @Test func reverseScreenAcrossThemeSwitchRestoresNewThemeBackground() async {
         let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 320, height: 200))
         let dark = translucentDark, light = translucentLight
         install(view, dark: dark, light: light)
 
-        view.terminal.feed(text: "\(esc)[?5h")
+        view.feed(text: "\(esc)[?5h")
+        await drainMainQueue()
         #expect(RGBA(view.layer.backgroundColor) == RGBA(dark.foreground.withAlphaComponent(dark.background.cgColor.alpha)),
                 "control: reversed layer \(RGBA(view.layer.backgroundColor))")
         #expect(RGBA(view.effectiveNativeForegroundColor).rgb == RGBA(dark.background).rgb, "control: reversed fg")
-        view.terminal.feed(text: "\(esc)[?5l")
+        view.feed(text: "\(esc)[?5l")
+        await drainMainQueue()
         #expect(RGBA(view.layer.backgroundColor) == RGBA(dark.background), "control: reverse off restores")
 
-        view.terminal.feed(text: "\(esc)[?5h")
+        view.feed(text: "\(esc)[?5h")
+        await drainMainQueue()
         view.terminalAppearance = .light
         #expect(RGBA(view.layer.backgroundColor) == RGBA(light.foreground.withAlphaComponent(light.background.cgColor.alpha)),
                 "reversed layer after theme switch: \(RGBA(view.layer.backgroundColor))")
@@ -111,7 +121,8 @@ final class Upstream119ViewIntegrationTestsIOS {
         #expect(reversedFg.rgb == RGBA(light.background).rgb,
                 "reversed fg after theme switch (before reverse off) is stale: \(reversedFg)")
 
-        view.terminal.feed(text: "\(esc)[?5l")
+        view.feed(text: "\(esc)[?5l")
+        await drainMainQueue()
         let restored = RGBA(view.layer.backgroundColor)
         #expect(restored == RGBA(light.background),
                 "reverse off restored a stale pre-switch background: \(restored)")

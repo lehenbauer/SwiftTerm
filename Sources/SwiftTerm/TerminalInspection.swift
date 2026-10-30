@@ -73,6 +73,41 @@ public struct TerminalInspectionSnapshot: Sendable, Equatable {
 
     public var modes: TerminalModeSummary
     public var kittyKeyboard: KittyKeyboardInspection
+    /// Scroll position, history trim, region/margins and saved cursor of the
+    /// active buffer.
+    public var bufferGeometry: TerminalBufferGeometryInspection
+}
+
+/// Active-buffer positions an inspection reports alongside the viewport text.
+public struct TerminalBufferGeometryInspection: Sendable, Equatable, Codable {
+    /// Buffer row shown at the top of the viewport (`yDisp`).
+    public var viewportTopRow: Int
+    /// Buffer row at the top of the live screen (`yBase`).
+    public var liveTopRow: Int
+    /// Rows currently held, history plus screen.
+    public var lineCount: Int
+    /// Rows trimmed from history over the buffer's lifetime.
+    public var totalLinesTrimmed: Int
+    public var scrollTop: Int
+    public var scrollBottom: Int
+    public var marginLeft: Int
+    public var marginRight: Int
+    /// DECSC/1048 saved cursor, screen-relative.
+    public var savedCursorCol: Int
+    public var savedCursorRow: Int
+
+    enum CodingKeys: String, CodingKey {
+        case viewportTopRow = "viewport_top_row"
+        case liveTopRow = "live_top_row"
+        case lineCount = "line_count"
+        case totalLinesTrimmed = "total_lines_trimmed"
+        case scrollTop = "scroll_top"
+        case scrollBottom = "scroll_bottom"
+        case marginLeft = "margin_left"
+        case marginRight = "margin_right"
+        case savedCursorCol = "saved_cursor_col"
+        case savedCursorRow = "saved_cursor_row"
+    }
 }
 
 public struct TerminalModeSummary: Sendable, Equatable {
@@ -122,6 +157,7 @@ extension TerminalInspectionSnapshot: Codable {
         case contentHash = "content_hash"
         case modes
         case kittyKeyboard = "kitty_keyboard"
+        case bufferGeometry = "buffer_geometry"
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -143,6 +179,7 @@ extension TerminalInspectionSnapshot: Codable {
         try c.encode(String(contentHash), forKey: .contentHash)
         try c.encode(modes, forKey: .modes)
         try c.encode(kittyKeyboard, forKey: .kittyKeyboard)
+        try c.encode(bufferGeometry, forKey: .bufferGeometry)
     }
 
     public init(from decoder: Decoder) throws {
@@ -172,6 +209,7 @@ extension TerminalInspectionSnapshot: Codable {
         contentHash = parsed
         modes = try c.decode(TerminalModeSummary.self, forKey: .modes)
         kittyKeyboard = try c.decode(KittyKeyboardInspection.self, forKey: .kittyKeyboard)
+        bufferGeometry = try c.decode(TerminalBufferGeometryInspection.self, forKey: .bufferGeometry)
     }
 }
 
@@ -278,6 +316,18 @@ extension Terminal {
                 buffer: bufferKind,
                 otherBufferFlagsRaw: otherMode.flags.rawValue,
                 otherBufferStackDepth: otherMode.stack.count
+            ),
+            bufferGeometry: TerminalBufferGeometryInspection(
+                viewportTopRow: b.yDisp,
+                liveTopRow: b.yBase,
+                lineCount: b.lines.count,
+                totalLinesTrimmed: b.totalLinesTrimmed,
+                scrollTop: b.scrollTop,
+                scrollBottom: b.scrollBottom,
+                marginLeft: b.marginLeft,
+                marginRight: b.marginRight,
+                savedCursorCol: b.savedX,
+                savedCursorRow: b.savedY
             )
         )
     }
@@ -411,7 +461,7 @@ extension TerminalView {
         let effective = getEffectiveWidth(size: boundsSize)
         let reserved = max(0, boundsSize.width - effective)
         let scale = inspectionScaleFactor()
-        let engine = terminal
+        let engine: (cols: Int, rows: Int)? = terminal == nil ? nil : withTerminal { ($0.cols, $0.rows) }
         return TerminalViewGeometrySnapshot(
             cellWidthPoints: Double(cell.width),
             cellHeightPoints: Double(cell.height),
@@ -433,9 +483,9 @@ extension TerminalView {
 
     /// Engine + geometry + input policy in one capture on the view's mutation context.
     public func inspectAll(trimRight: Bool = true) -> TerminalViewInspectionSnapshot {
-        let term = terminal!
+        let engine = withTerminal { $0.inspect(trimRight: trimRight) }
         return TerminalViewInspectionSnapshot(
-            terminal: term.inspect(trimRight: trimRight),
+            terminal: engine,
             geometry: inspectGeometry(),
             inputPolicy: inspectInputPolicy()
         )

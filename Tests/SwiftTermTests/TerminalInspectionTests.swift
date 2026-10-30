@@ -216,6 +216,33 @@ final class TerminalInspectionTests {
         #expect(decoded == snap)
     }
 
+    @Test func testBufferGeometryReportsRegionSavedCursorAndTrim() throws {
+        let (terminal, _) = TerminalTestHarness.makeTerminal(cols: 20, rows: 4, scrollback: 3)
+        for i in 0..<12 {
+            terminal.feed(text: "row \(i)\r\n")
+        }
+        terminal.feed(text: "\(esc)[2;5H\(esc)7\(esc)[2;3r")
+        let geometry = terminal.inspect().bufferGeometry
+
+        #expect(geometry.savedCursorCol == 4)
+        #expect(geometry.savedCursorRow == 1)
+        #expect(geometry.scrollTop == 1)
+        #expect(geometry.scrollBottom == 2)
+        #expect(geometry.marginLeft == 0)
+        #expect(geometry.marginRight == 19)
+        #expect(geometry.lineCount == 7)
+        #expect(geometry.liveTopRow == 3)
+        #expect(geometry.viewportTopRow == 3)
+        // 13 rows were written into 4 + 3 capacity: 6 trimmed.
+        #expect(geometry.totalLinesTrimmed == 6)
+
+        let data = try JSONEncoder().encode(terminal.inspect())
+        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let wire = try #require(obj?["buffer_geometry"] as? [String: Any])
+        #expect(wire["saved_cursor_row"] as? Int == 1)
+        #expect(wire["total_lines_trimmed"] as? Int == 6)
+    }
+
     @Test func testFnvMatchesIndependentImplementation() {
         // Empty single-row trimRight=1 → "trimRight=1\n\n"
         let hash = Terminal.computeInspectionContentHash(trimRight: true, viewportText: [""])

@@ -110,7 +110,7 @@ final class StyledSelectionTests {
 
     @Test func testRunConcatMatchesScrollbackSelection() {
         let view = makeView(cols: 10, rows: 2)
-        view.getTerminal().changeHistorySize(50)
+        view.changeScrollback(50)
         view.feed(text: "ABCDEFGHIJKLMNO\r\nsecond\r\nthird\r\nfourth")
         selectAll(view)
         expectConcatenationMatchesPlainSelection(view)
@@ -145,8 +145,9 @@ final class StyledSelectionTests {
     @Test func testRunConcatMatchesInteriorNulAndAttributeOnlyCells() {
         let view = makeView(cols: 10)
         view.feed(text: "AXB")
-        let terminal = view.getTerminal()
-        terminal.buffer.lines[0][1] = CharData(attribute: Attribute(fg: .defaultColor, bg: .defaultInvertedColor, style: .bold))
+        view.withTerminal { terminal in
+            terminal.buffer.lines[0][1] = CharData(attribute: Attribute(fg: .defaultColor, bg: .defaultInvertedColor, style: .bold))
+        }
         select(view, start: Position(col: 0, row: 0), end: Position(col: 3, row: 0))
         expectConcatenationMatchesPlainSelection(view)
         #expect(view.getSelection() == "A B")
@@ -154,7 +155,9 @@ final class StyledSelectionTests {
 
         let attributeOnly = makeView(cols: 10)
         attributeOnly.feed(text: "A")
-        attributeOnly.getTerminal().buffer.lines[0][1] = CharData(attribute: Attribute(fg: .defaultColor, bg: .defaultInvertedColor, style: .bold))
+        attributeOnly.withTerminal { terminal in
+            terminal.buffer.lines[0][1] = CharData(attribute: Attribute(fg: .defaultColor, bg: .defaultInvertedColor, style: .bold))
+        }
         select(attributeOnly, start: Position(col: 0, row: 0), end: Position(col: 3, row: 0))
         expectConcatenationMatchesPlainSelection(attributeOnly)
         #expect(attributeOnly.getSelection() == "A")

@@ -32,7 +32,7 @@ final class IOSLegacyKeyRepeatTests: XCTestCase {
 
     private final class ObservedView: TerminalView {
         var label = ""
-        deinit {
+        isolated deinit {
             print("[IOSLegacyKeyRepeat] deinit view=\(label)")
         }
     }
@@ -140,7 +140,6 @@ final class IOSLegacyKeyRepeatTests: XCTestCase {
         if let leaked = weakView {
             // Release the timer so a failing run does not keep firing.
             leaked.keyRepeat?.invalidate()
-            leaked.keyRepeat = nil
         }
         weakView = nil
         // A released view's timer must not fire after dealloc.

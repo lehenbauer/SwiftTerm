@@ -40,14 +40,13 @@ terminalView.nativeBackgroundColor = NSColor.black    // or UIColor.black
 
 ### ANSI Palette
 
-To install a custom 256-color palette, use ``Terminal/installPalette(colors:)``.
-The array must contain exactly 256 ``Color`` values — the first 16 are the
-standard ANSI colors, 16-231 are the 6x6x6 color cube, and 232-255 are the
-greyscale ramp:
+To install custom base ANSI colors on a view, use
+``TerminalView/installColors(_:)``.
+The array must contain exactly 16 ``Color`` values. SwiftTerm derives entries
+16 through 255 from these colors and the selected ANSI 256 strategy:
 
 ```swift
-let terminal = terminalView.getTerminal()
-terminal.installPalette(colors: myCustomPalette)
+terminalView.installColors(myCustomPalette)
 ```
 
 ### Selection and Cursor Colors
@@ -56,6 +55,16 @@ terminal.installPalette(colors: myCustomPalette)
 terminalView.selectedTextBackgroundColor = NSColor.systemBlue.withAlphaComponent(0.3)
 terminalView.caretColor = NSColor.systemGreen
 terminalView.caretTextColor = NSColor.black  // optional: text color under cursor
+```
+
+### Progress Bar Color
+
+The OSC 9;4 progress bar follows the system accent color unless the host picks
+one, which keeps it in step with a themed terminal. The error and paused states
+keep their system red and orange either way:
+
+```swift
+terminalView.progressBarColor = NSColor.systemPurple  // nil restores the accent color
 ```
 
 ## Cursor Style
@@ -84,8 +93,20 @@ essential for terminal applications like Emacs that rely on the Meta key:
 terminalView.optionAsMetaKey = true
 ```
 
-On iOS with an external keyboard, the same property is available. The iOS view
-also supports toggling it at runtime with Option-Command-O.
+With it `false`, the key goes to the OS, which composes whatever the keyboard
+layout puts behind it (Option+Q is `@` on a Turkish layout). The layout composes
+nothing for the arrows, Home, End, the function keys, Enter, Tab and Backspace,
+so `optionAsMetaKeyForFunctionalKeys` keeps Option as Meta on those keys alone:
+Option+Left still moves a word back while Option+Q still types `@`, which is
+what iTerm2 does when its Option key is set to "Normal":
+
+```swift
+terminalView.optionAsMetaKey = false
+terminalView.optionAsMetaKeyForFunctionalKeys = true
+```
+
+On iOS with an external keyboard, `optionAsMetaKey` is available too. The iOS
+view also supports toggling it at runtime with Option-Command-O.
 
 ### Mouse Reporting
 
@@ -128,7 +149,34 @@ Link activation is also gated by `linkHighlightMode`. The reporting mode chooses
 how links are discovered during tracking, while highlight mode decides whether a
 click/tap is allowed to open the link.
 
+### Link Color
+
+By default a highlighted link is underlined in its own text color. Set
+`linkColor` to draw every highlighted link, explicit or implicit, in one color
+instead; set it back to `nil` to restore the default:
+
+```swift
+terminalView.linkColor = NSColor.systemBlue
+```
+
+To color only the underline while keeping the text and strikethrough colors,
+set `linkUnderlineColor` (`NSColor?` on macOS, `UIColor?` on iOS):
+
+```swift
+terminalView.linkUnderlineColor = NSColor.systemCyan
+```
+
+`linkUnderlineColor` takes precedence over `linkColor` for highlighted link
+underlines, including OSC 8 and implicit links. Its default, `nil`, preserves
+`linkColor` behavior (or the cell foreground when both are `nil`). It leaves
+non-link decorations unchanged. Selection colors take precedence over both.
+
 ### What happens when the user activates a link
+
+Set `TerminalOptions.enableOsc8Hyperlinks` to `false` to disable OSC 8 hyperlinks
+at startup. Set `terminalView.enableOsc8Hyperlinks` to change this while the
+terminal runs. The setting also hides links already in the buffer. Implicit URL
+and path detection remain available.
 
 When a click/tap lands on an active link, ``TerminalView`` calls
 ``TerminalViewDelegate/requestOpenLink(source:link:params:)``.
@@ -137,8 +185,13 @@ When a click/tap lands on an active link, ``TerminalView`` calls
   contains parsed key/value pairs from the OSC 8 payload (when present).
 - For implicit URL detection, `link` is the detected URL text and `params` is
   empty.
-- On macOS, the default delegate implementation opens the link with
-  `NSWorkspace.shared.open`.
+- On macOS, the view checks the target before it calls the delegate. HTTP and
+  HTTPS links need a host. Mail links need an address. Custom URL schemes require
+  confirmation, with Cancel as the default. Local files must exist and must not
+  be executable files, scripts, applications, or other active content. The check
+  resolves symbolic links and rejects remote file hosts. These checks apply to
+  OSC 8 links and detected links. The delegate receives an absolute URL with a
+  canonical path for local files. The default delegate opens the checked URL.
 - On iOS/visionOS, implement `requestOpenLink` in your delegate to decide how
   to handle navigation (for example, with `UIApplication.open`).
 
@@ -149,6 +202,8 @@ When a click/tap lands on an active link, ``TerminalView`` calls
   hovering enables link preview/highlighting and Command-click opens links.
 - If you switch to `.hover`, link activation does not require Command.
 - `.always` and `.alwaysWithModifier` only activate explicit OSC 8 links.
+- Link previews escape invisible characters, directional controls, and line
+  breaks. File previews show the canonical path.
 
 ### iOS and visionOS behavior
 
@@ -205,9 +260,9 @@ Key options:
 | `screenReaderMode` | `false` | Accessibility mode |
 | `enableSixelReported` | `true` | Advertise Sixel support to applications |
 | `initialBidiState` | implicit, autodetect, LTR | BiDi state for new paragraphs after startup or reset |
-| `maximumBidiParagraphRows` | `500` | Maximum rows processed as one BiDi paragraph |
+| `maximumBidiParagraphRows` | `120` | Maximum rows processed as one BiDi paragraph |
 | `initialBidiArrowKeySwap` | `false` | Initial state for BiDi left/right arrow swapping |
-| `kittyImageCacheLimitBytes` | 320 MB | Memory limit for Kitty image cache |
+| `kittyGraphics` | 10 MB per screen, direct media only | Kitty storage and local-media policy |
 | `ansi256PaletteStrategy` | `.base16Lab` | 256-color palette generation strategy |
 
 The `.base16Lab` and `.base16LabHarmonious` strategies are based on the
@@ -256,6 +311,16 @@ terminalView.antiAliasCustomBlockGlyphs = true
 
 // Use bright colors for bold text (traditional terminal behavior)
 terminalView.useBrightColors = true
+
+// Keep explicit bright/256-color foreground indexes without promoting bold
+// text to a bright color. Both properties default to true for compatibility.
+terminalView.useBrightColors = false
+terminalView.collapseBrightColorsToBase = false
+
+// Darken or lighten text that falls below a WCAG contrast ratio against
+// its background, such as colors a program picked for a dark theme shown
+// on a light one. 1, the default, keeps every color as it is.
+terminalView.minimumContrastRatio = 4.5
 ```
 
 ### GPU-Accelerated Rendering
@@ -303,3 +368,23 @@ custom overlay), set `notifyUpdateChanges` to `true` and implement
 ```swift
 terminalView.notifyUpdateChanges = true
 ```
+
+## Progress Bar Timeout
+
+The OSC 9;4 progress bar clears itself after 15 seconds without a report, so a
+program that dies mid-task does not leave a bar behind. That safety net assumes
+reports keep arriving while the work runs: a program that reports once at the
+start and once at the end of a long task looks silent in between and loses its
+bar halfway through.
+
+``TerminalView/progressReportTimeout`` sets that wait, and `nil` turns it off
+for a host that trusts its program to close every bar it opens:
+
+```swift
+terminalView.progressReportTimeout = 60   // wait a minute instead
+terminalView.progressReportTimeout = nil  // keep the bar until the program removes it
+```
+
+Changing it while a bar is on screen restarts the wait from that moment, and
+`nil` cancels a wait already running. The default is
+``TerminalView/defaultProgressReportTimeout``.

@@ -246,7 +246,8 @@ struct MacSelectionAnchorTests {
 
         #expect(g.selection.active)
         #expect(g.selection.start == Position(col: 0, row: 2))
-        #expect(g.selection.end == Position(col: 9, row: 4))
+        // Row selections extend by whole rows (adjudication 1).
+        #expect(g.selection.end == Position(col: g.terminal.cols - 1, row: 4))
     }
 
     @Test func earlierWordSelectionDoesNotLeakIntoNextDrag() {
@@ -270,8 +271,9 @@ struct MacSelectionAnchorTests {
         g.feedRows(10)
         g.down(Position(col: 3, row: 2))
         g.drag(Position(col: 3, row: 2))
-        #expect(g.selection.active)
-        #expect(!g.selection.hasSelectionRange)
+        // Same-cell jitter stays a click (adjudication 2) ...
+        #expect(!g.selection.active)
+        // ... and the later cross-cell drag still starts at the press.
         g.drag(Position(col: 8, row: 2))
 
         #expect(g.selection.start == Position(col: 3, row: 2))
@@ -299,8 +301,8 @@ struct MacSelectionAnchorTests {
         g.drag(Position(col: 12, row: 3))
         g.drag(Position(col: 24, row: 5))
 
-        #expect(g.selection.start == Position(col: 12, row: 3))
-        #expect(g.selection.end == Position(col: 24, row: 5))
+        // A drag with no live press starts nothing (adjudication 3).
+        #expect(!g.selection.active)
     }
 
     @Test func dragAfterCompletedClickDoesNotReuseItsPress() {
@@ -310,18 +312,22 @@ struct MacSelectionAnchorTests {
         g.up(Position(col: 0, row: 1))
         g.drag(Position(col: 12, row: 3))
 
-        #expect(g.selection.start == Position(col: 12, row: 3))
+        // The completed press is never reused (adjudication 3).
+        #expect(!g.selection.active)
+        #expect(g.selection.start != Position(col: 0, row: 1) || !g.selection.hasSelectionRange)
     }
 
     // MARK: - Single use
 
-    @Test func selectionClearedByLinefeedDoesNotRestartAtPress() {
+    @Test func selectionClearedByOverwriteDoesNotRestartAtPress() {
         let g = SelectionGesture()
         g.feedRows(6)
         g.down(Position(col: 0, row: 1))
         g.drag(Position(col: 4, row: 2))
         #expect(g.selection.start == Position(col: 0, row: 1))
-        g.view.feed(text: "\r\nOUT")
+        // Output that overwrites the selected cells clears an ordinary view's
+        // selection (adjudication 4; mirrors preserve it under D2).
+        g.view.feed(text: "\(esc)[2;1HXXXX")
         #expect(!g.selection.active)
         g.drag(Position(col: 6, row: 3))
 

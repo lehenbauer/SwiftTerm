@@ -1,6 +1,16 @@
+//
+//  MetalRendererRedTeamTests.swift
+//
+//  Fork red-team invariants for the Metal renderer's incremental row cache,
+//  migrated to v1.99.2: every optimized frame must equal a from-scratch
+//  rebuild of the same state (`MetalRowCacheTests.Harness.freshFrame`), and
+//  a change that affects every visible row must rebuild every visible row.
+//  The fork's line-info and full-refresh generation probes were mechanism
+//  counters that v1.99.2 does not have; the observable frame equality and
+//  row counts they guarded are kept.
+//
 #if os(macOS)
 import AppKit
-import CoreText
 import Foundation
 import Testing
 
@@ -9,254 +19,163 @@ import Testing
 @MainActor
 @Suite(.serialized)
 final class MetalRendererRedTeamTests {
-    @Test func blockAntialiasToggleWithoutScrollMatchesFullRebuild() throws {
-        let (view, renderer) = makeHarness()
-        let blockLine = "\u{2588}\u{2580}\u{2584}\u{258c}\u{2590} cached block glyphs\r\n"
-        view.terminal.feed(text: String(repeating: blockLine, count: 40))
-        transferTerminalDirtyRange(to: view)
-        _ = renderer.debugBuildSnapshot(scale: 1)
+    private static let rows = 12
 
-        renderer.debugResetMetrics()
-        view.antiAliasCustomBlockGlyphs.toggle()
-        transferTerminalDirtyRange(to: view)
+    /// Rows the harness view actually shows (its frame sizes the grid).
+    private func visibleRows(_ harness: MetalRowCacheTests.Harness) -> Int {
+        harness.view.terminalDimensions.rows
+    }
+    private let blockLine = "\u{2588}\u{2580}\u{2584}\u{258c}\u{2590} cached block glyphs\r\n"
 
-        let optimized = renderer.debugBuildSnapshot(scale: 1)
-        let metrics = renderer.debugMetricsSnapshot()
-        let forced = renderer.debugBuildSnapshot(scale: 1, forceFullRebuild: true)
-        let snapshotsEqual = optimized == forced
-
-        print(
-            "REDTEAM_BLOCK_AA_NO_SCROLL snapshotsEqual=\(snapshotsEqual) " +
-            "rowsRemapped=\(metrics.rowsRemapped) rowsRebuilt=\(metrics.rowsRebuilt) " +
-            "rowsCached=\(metrics.rowsCached) dirtyRows=\(metrics.dirtyRowsRequested)"
-        )
-        #expect(metrics.rowsRemapped == 0)
-        #expect(metrics.rowsRebuilt == 12)
-        #expect(snapshotsEqual)
+    private func makeHarness(scrollback: Int = 200) throws -> MetalRowCacheTests.Harness {
+        try #require(MetalRowCacheTests.Harness(cols: 40, rows: 12, scrollback: scrollback))
     }
 
-    @Test func scrollCoalescedWithBlockAntialiasToggleMatchesFullRebuild() throws {
-        let (view, renderer) = makeHarness()
-
-        let blockLine = "\u{2588}\u{2580}\u{2584}\u{258c}\u{2590} cached block glyphs\r\n"
-        view.terminal.feed(text: String(repeating: blockLine, count: 40))
-        transferTerminalDirtyRange(to: view)
-        _ = renderer.debugBuildSnapshot(scale: 1)
-
-        renderer.debugResetMetrics()
-        view.terminal.feed(text: "scroll one row\r\n")
-        let lineInfoGenerationBefore = view.lineInfoCacheGeneration
-        view.antiAliasCustomBlockGlyphs.toggle()
-        let lineInfoGenerationAfter = view.lineInfoCacheGeneration
-        transferTerminalDirtyRange(to: view)
-
-        let optimized = renderer.debugBuildSnapshot(scale: 1)
-        let metrics = renderer.debugMetricsSnapshot()
-        let forced = renderer.debugBuildSnapshot(scale: 1, forceFullRebuild: true)
-        let snapshotsEqual = optimized == forced
-
-        print(
-            "REDTEAM_BLOCK_AA_SCROLL snapshotsEqual=\(snapshotsEqual) " +
-            "rowsRemapped=\(metrics.rowsRemapped) rowsRebuilt=\(metrics.rowsRebuilt) " +
-            "rowsCached=\(metrics.rowsCached) dirtyRows=\(metrics.dirtyRowsRequested) " +
-            "lineInfoGeneration=\(lineInfoGenerationBefore)->\(lineInfoGenerationAfter)"
-        )
-        #expect(metrics.rowsRemapped > 0)
-        #expect(metrics.dirtyRowsRequested == 12)
-        #expect(lineInfoGenerationAfter == lineInfoGenerationBefore)
-        #expect(snapshotsEqual)
+    /// Renders the current state incrementally, then from scratch.
+    private func optimizedAndTruth(_ harness: MetalRowCacheTests.Harness) async throws
+        -> (MetalRowCacheTests.DrawnFrame, MetalRowCacheTests.DrawnFrame)
+    {
+        let optimized = try #require(await harness.frame())
+        let truth = try #require(await harness.freshFrame())
+        return (optimized, truth)
     }
 
-    @Test func scrollCoalescedWithCustomBlockToggleMatchesFullRebuild() throws {
-        let (view, renderer) = makeHarness()
+    @Test(.enabled(if: MetalRowCacheTests.metalIsUsable, "needs Metal"))
+    func blockAntialiasToggleWithoutScrollMatchesFullRebuild() async throws {
+        let harness = try makeHarness()
+        harness.view.feed(text: String(repeating: blockLine, count: 40))
+        _ = try #require(await harness.frame())
 
-        let blockLine = "\u{2588}\u{2580}\u{2584}\u{258c}\u{2590} cached block glyphs\r\n"
-        view.terminal.feed(text: String(repeating: blockLine, count: 40))
-        transferTerminalDirtyRange(to: view)
-        _ = renderer.debugBuildSnapshot(scale: 1)
+        harness.view.antiAliasCustomBlockGlyphs.toggle()
+        let (optimized, truth) = try await optimizedAndTruth(harness)
 
-        renderer.debugResetMetrics()
-        view.terminal.feed(text: "scroll one row\r\n")
-        let fullRefreshGenerationBefore = view.terminal.fullRefreshGeneration
-        view.customBlockGlyphs.toggle()
-        let fullRefreshGenerationAfter = view.terminal.fullRefreshGeneration
-        transferTerminalDirtyRange(to: view)
-
-        let optimized = renderer.debugBuildSnapshot(scale: 1)
-        let metrics = renderer.debugMetricsSnapshot()
-        let forced = renderer.debugBuildSnapshot(scale: 1, forceFullRebuild: true)
-        let snapshotsEqual = optimized == forced
-
-        print(
-            "REDTEAM_CUSTOM_BLOCK_SCROLL snapshotsEqual=\(snapshotsEqual) " +
-            "rowsRemapped=\(metrics.rowsRemapped) rowsRebuilt=\(metrics.rowsRebuilt) " +
-            "rowsCached=\(metrics.rowsCached) dirtyRows=\(metrics.dirtyRowsRequested) " +
-            "fullRefreshGeneration=\(fullRefreshGenerationBefore)->\(fullRefreshGenerationAfter)"
-        )
-        #expect(metrics.rowsRemapped > 0)
-        #expect(metrics.rowsRebuilt == 12)
-        #expect(metrics.dirtyRowsRequested == 12)
-        #expect(fullRefreshGenerationAfter == fullRefreshGenerationBefore + 1)
-        #expect(snapshotsEqual)
+        #expect(optimized.moved == 0)
+        #expect(optimized.rebuilt == visibleRows(harness))
+        #expect(optimized.rows == truth.rows)
+        #expect(optimized.pixels == truth.pixels)
     }
 
-    @Test func scrollCoalescedWithBrightColorToggleMatchesFullRebuild() throws {
-        let (view, renderer) = makeHarness()
+    @Test(.enabled(if: MetalRowCacheTests.metalIsUsable, "needs Metal"))
+    func scrollCoalescedWithBlockAntialiasToggleMatchesFullRebuild() async throws {
+        let harness = try makeHarness()
+        harness.view.feed(text: String(repeating: blockLine, count: 40))
+        _ = try #require(await harness.frame())
 
+        harness.view.feed(text: "scroll one row\r\n")
+        harness.view.antiAliasCustomBlockGlyphs.toggle()
+        let (optimized, truth) = try await optimizedAndTruth(harness)
+
+        #expect(optimized.rebuilt == visibleRows(harness))
+        #expect(optimized.rows == truth.rows)
+        #expect(optimized.pixels == truth.pixels)
+    }
+
+    @Test(.enabled(if: MetalRowCacheTests.metalIsUsable, "needs Metal"))
+    func scrollCoalescedWithCustomBlockToggleMatchesFullRebuild() async throws {
+        let harness = try makeHarness()
+        harness.view.feed(text: String(repeating: blockLine, count: 40))
+        _ = try #require(await harness.frame())
+
+        harness.view.feed(text: "scroll one row\r\n")
+        harness.view.customBlockGlyphs.toggle()
+        let (optimized, truth) = try await optimizedAndTruth(harness)
+
+        #expect(optimized.rebuilt == visibleRows(harness))
+        #expect(optimized.rows == truth.rows)
+        #expect(optimized.pixels == truth.pixels)
+    }
+
+    @Test(.enabled(if: MetalRowCacheTests.metalIsUsable, "needs Metal"))
+    func scrollCoalescedWithBrightColorToggleMatchesFullRebuild() async throws {
+        let harness = try makeHarness()
         let brightLine = "\u{1b}[91mbright cached text\u{1b}[0m\r\n"
-        view.terminal.feed(text: String(repeating: brightLine, count: 40))
-        transferTerminalDirtyRange(to: view)
-        _ = renderer.debugBuildSnapshot(scale: 1)
+        harness.view.feed(text: String(repeating: brightLine, count: 40))
+        _ = try #require(await harness.frame())
 
-        renderer.debugResetMetrics()
-        view.terminal.feed(text: "scroll one row\r\n")
-        let fullRefreshGenerationBefore = view.terminal.fullRefreshGeneration
-        view.useBrightColors.toggle()
-        let fullRefreshGenerationAfter = view.terminal.fullRefreshGeneration
-        transferTerminalDirtyRange(to: view)
+        harness.view.feed(text: "scroll one row\r\n")
+        harness.view.useBrightColors.toggle()
+        let (optimized, truth) = try await optimizedAndTruth(harness)
 
-        let optimized = renderer.debugBuildSnapshot(scale: 1)
-        let metrics = renderer.debugMetricsSnapshot()
-        let forced = renderer.debugBuildSnapshot(scale: 1, forceFullRebuild: true)
-        let snapshotsEqual = optimized == forced
-
-        print(
-            "REDTEAM_BRIGHT_COLOR_SCROLL snapshotsEqual=\(snapshotsEqual) " +
-            "rowsRemapped=\(metrics.rowsRemapped) rowsRebuilt=\(metrics.rowsRebuilt) " +
-            "rowsCached=\(metrics.rowsCached) dirtyRows=\(metrics.dirtyRowsRequested) " +
-            "fullRefreshGeneration=\(fullRefreshGenerationBefore)->\(fullRefreshGenerationAfter)"
-        )
-        #expect(metrics.rowsRemapped > 0)
-        #expect(metrics.rowsRebuilt == 12)
-        #expect(metrics.dirtyRowsRequested == 12)
-        #expect(fullRefreshGenerationAfter == fullRefreshGenerationBefore + 1)
-        #expect(snapshotsEqual)
+        #expect(optimized.rebuilt == visibleRows(harness))
+        #expect(optimized.rows == truth.rows)
+        #expect(optimized.pixels == truth.pixels)
     }
 
-    @Test func fullRefreshInvalidatesRowsWithoutDirtyTransfer() throws {
-        let (view, renderer) = makeHarness()
-        let blockLine = "\u{2588}\u{2580}\u{2584}\u{258c}\u{2590} cached block glyphs\r\n"
-        view.terminal.feed(text: String(repeating: blockLine, count: 40))
-        transferTerminalDirtyRange(to: view)
-        _ = renderer.debugBuildSnapshot(scale: 1)
+    /// A full-refresh change with no terminal dirty rows still rebuilds every
+    /// visible row.
+    @Test(.enabled(if: MetalRowCacheTests.metalIsUsable, "needs Metal"))
+    func fullRefreshInvalidatesRowsWithoutDirtyTransfer() async throws {
+        let harness = try makeHarness()
+        harness.view.feed(text: String(repeating: blockLine, count: 40))
+        _ = try #require(await harness.frame())
+        harness.view.withTerminal { $0.clearUpdateRange() }
 
-        renderer.debugResetMetrics()
-        view.antiAliasCustomBlockGlyphs.toggle()
+        harness.view.antiAliasCustomBlockGlyphs.toggle()
+        let (optimized, truth) = try await optimizedAndTruth(harness)
 
-        let optimized = renderer.debugBuildSnapshot(scale: 1)
-        let metrics = renderer.debugMetricsSnapshot()
-        let forced = renderer.debugBuildSnapshot(scale: 1, forceFullRebuild: true)
-
-        print(
-            "REDTEAM_FULL_REFRESH_NO_DIRTY snapshotsEqual=\(optimized == forced) " +
-            "rowsRebuilt=\(metrics.rowsRebuilt) dirtyRows=\(metrics.dirtyRowsRequested) " +
-            "fullRefreshInvalidations=\(metrics.fullRefreshInvalidations)"
-        )
-        #expect(metrics.rowsRebuilt == 12)
-        #expect(metrics.dirtyRowsRequested == 0)
-        #expect(metrics.fullRefreshInvalidations == 1)
-        #expect(optimized == forced)
+        #expect(optimized.rebuilt == visibleRows(harness))
+        #expect(optimized.rows == truth.rows)
+        #expect(optimized.pixels == truth.pixels)
     }
 
-    @Test func fontSmoothingInvalidatesRasterizedGlyphRows() throws {
-        let (view, renderer) = makeHarness()
-        view.terminal.feed(text: String(repeating: "cached glyph text\r\n", count: 40))
-        transferTerminalDirtyRange(to: view)
-        _ = renderer.debugBuildSnapshot(scale: 1)
+    /// Font smoothing changes rasterized glyphs, so every row is rebuilt and
+    /// the frame equals a cold render.
+    @Test(.enabled(if: MetalRowCacheTests.metalIsUsable, "needs Metal"))
+    func fontSmoothingInvalidatesRasterizedGlyphRows() async throws {
+        let harness = try makeHarness()
+        harness.view.feed(text: String(repeating: "cached glyph text\r\n", count: 40))
+        let before = try #require(await harness.frame())
 
-        renderer.debugResetMetrics()
-        view.fontSmoothing.toggle()
-        renderer.debugBuildOnly(scale: 1)
-        let metrics = renderer.debugMetricsSnapshot()
+        harness.view.fontSmoothing.toggle()
+        let (optimized, truth) = try await optimizedAndTruth(harness)
 
-        print(
-            "REDTEAM_FONT_SMOOTHING rowsRebuilt=\(metrics.rowsRebuilt) " +
-            "glyphMisses=\(metrics.glyphCacheMisses) " +
-            "fullRefreshInvalidations=\(metrics.fullRefreshInvalidations)"
-        )
-        #expect(metrics.rowsRebuilt == 12)
-        #expect(metrics.glyphCacheMisses > 0)
-        #expect(metrics.fullRefreshInvalidations == 1)
+        #expect(optimized.rebuilt == visibleRows(harness))
+        #expect(optimized.pixels == truth.pixels)
+        #expect(optimized.pixels != before.pixels, "control: smoothing must change rasterized glyphs")
     }
 
-    @Test func retainedFontTableIsBoundedAcrossFontChanges() throws {
-        let (view, renderer) = makeHarness()
-        view.terminal.feed(text: "font cache probe\r\n")
-        transferTerminalDirtyRange(to: view)
-        _ = renderer.debugBuildSnapshot(scale: 1)
-        let initialCount = renderer.debugMetricsSnapshot().retainedFontCount
+    /// The renderer's font tables stay bounded across many font changes.
+    @Test(.enabled(if: MetalRowCacheTests.metalIsUsable, "needs Metal"))
+    func retainedFontTableIsBoundedAcrossFontChanges() async throws {
+        let harness = try makeHarness()
+        harness.view.feed(text: "font cache probe\r\n")
+        _ = try #require(await harness.frame())
+        let initialCount = harness.renderer.debugRasterFontRegistryCount
         var maximumCount = initialCount
 
         for pointSize in 8..<40 {
-            view.font = NSFont.monospacedSystemFont(ofSize: CGFloat(pointSize), weight: .regular)
-            view.resize(cols: 40, rows: 12)
-            view.frame.size = CGSize(width: view.cellDimension.width * 40,
-                                     height: view.cellDimension.height * 12)
-            _ = renderer.debugBuildSnapshot(scale: 1)
-            maximumCount = max(maximumCount, renderer.debugMetricsSnapshot().retainedFontCount)
+            harness.view.font = NSFont.monospacedSystemFont(ofSize: CGFloat(pointSize), weight: .regular)
+            harness.view.resize(cols: 40, rows: Self.rows)
+            _ = try #require(await harness.frame())
+            maximumCount = max(maximumCount, harness.renderer.debugRasterFontRegistryCount)
         }
 
-        let finalCount = renderer.debugMetricsSnapshot().retainedFontCount
-        print(
-            "REDTEAM_RETAINED_FONTS initial=\(initialCount) final=\(finalCount) " +
-            "maximum=\(maximumCount) changes=32 growth=\(finalCount - initialCount)"
-        )
-        #expect(finalCount <= initialCount + 1)
-        #expect(maximumCount <= initialCount + 1)
+        let finalCount = harness.renderer.debugRasterFontRegistryCount
+        #expect(finalCount <= initialCount + 1, "font table grew \(initialCount) -> \(finalCount)")
+        #expect(maximumCount <= initialCount + 1, "font table peaked at \(maximumCount)")
     }
 
-    @Test func circularScrollbackRotationMatchesFullRebuild() throws {
-        let (view, renderer) = makeHarness(scrollback: 20)
+    @Test(.enabled(if: MetalRowCacheTests.metalIsUsable, "needs Metal"))
+    func circularScrollbackRotationMatchesFullRebuild() async throws {
+        let harness = try makeHarness(scrollback: 20)
         for line in 0..<100 {
-            view.terminal.feed(text: "prefill \(line)\r\n")
+            harness.view.feed(text: "prefill \(line)\r\n")
         }
-        transferTerminalDirtyRange(to: view)
-        _ = renderer.debugBuildSnapshot(scale: 1)
-        let initialYDisp = view.terminal.displayBuffer.yDisp
+        _ = try #require(await harness.frame())
+        let initialYDisp = harness.view.withTerminal { $0.displayBuffer.yDisp }
         var mismatches = 0
 
         for line in 0..<30 {
-            view.terminal.feed(text: "rotate \(line)\r\n")
-            transferTerminalDirtyRange(to: view)
-            let optimized = renderer.debugBuildSnapshot(scale: 1)
-            let forced = renderer.debugBuildSnapshot(scale: 1, forceFullRebuild: true)
-            if optimized != forced {
+            harness.view.feed(text: "rotate \(line)\r\n")
+            let (optimized, truth) = try await optimizedAndTruth(harness)
+            if optimized.rows != truth.rows || optimized.pixels != truth.pixels {
                 mismatches += 1
             }
         }
 
-        let finalYDisp = view.terminal.displayBuffer.yDisp
-        print(
-            "REDTEAM_CIRCULAR_ROTATION frames=30 mismatches=\(mismatches) " +
-            "yDisp=\(initialYDisp)->\(finalYDisp)"
-        )
+        let finalYDisp = harness.view.withTerminal { $0.displayBuffer.yDisp }
         #expect(finalYDisp == initialYDisp)
         #expect(mismatches == 0)
-    }
-
-    private func makeHarness(scrollback: Int = 200) -> (TerminalView, MetalTerminalRenderer) {
-        let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
-        view.resize(cols: 40, rows: 12)
-        view.terminal.changeScrollback(scrollback)
-        view.frame.size = CGSize(width: view.cellDimension.width * 40,
-                                 height: view.cellDimension.height * 12)
-        let renderer = MetalTerminalRenderer(debugTerminalView: view)
-        view.metalRenderer = renderer
-        return (view, renderer)
-    }
-
-    private func transferTerminalDirtyRange(to view: TerminalView) {
-        let terminal = view.terminal!
-        guard let (rowStart, rowEnd) = terminal.getUpdateRange() else {
-            view.setMetalDirtyRange(nil)
-            return
-        }
-        let buffer = terminal.displayBuffer
-        let maxRow = buffer.lines.count - 1
-        let start = max(0, min(buffer.yDisp + rowStart, maxRow))
-        let end = max(0, min(buffer.yDisp + rowEnd, maxRow))
-        view.setMetalDirtyRange(start <= end ? start...end : nil)
-        terminal.clearUpdateRange()
     }
 }
 #endif

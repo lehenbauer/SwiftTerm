@@ -13,8 +13,9 @@ import AppKit
 
 @testable import SwiftTerm
 
+@MainActor
 final class SelectionTests: TerminalDelegate {
-    func send(source: Terminal, data: ArraySlice<UInt8>) {
+    nonisolated func send(source: Terminal, data: ArraySlice<UInt8>) {
         print ("here")
     }
     
@@ -50,6 +51,20 @@ final class SelectionTests: TerminalDelegate {
         #expect(selection.getSelectedText() == "hello")
     }
 
+    @Test func testExplicitRangeAfterRowSelectionCopiesOnlyTheRange() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 40, rows: 5))
+        let selection = SelectionService(terminal: terminal)
+        terminal.feed(text: "hello world trailing")
+        selection.select(row: 0)
+
+        selection.setSelection(start: Position(col: 6, row: 0), end: Position(col: 11, row: 0))
+
+        #expect(selection.getSelectedText() == "world")
+        selection.dragExtend(bufferPosition: Position(col: 12, row: 0))
+        #expect(selection.start == Position(col: 6, row: 0))
+        #expect(selection.end == Position(col: 12, row: 0))
+    }
+
     @Test func testSelectWordOrExpressionSelectsBalancedParens() {
         let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 20, rows: 1))
         let selection = SelectionService(terminal: terminal)
@@ -63,12 +78,21 @@ final class SelectionTests: TerminalDelegate {
     }
 
 #if os(macOS)
+    @Test func testSearchAfterRowSelectionCopiesOnlyTheMatch() {
+        let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 400, height: 200))
+        view.feed(text: "hello world trailing")
+        view.withTerminal { _ in view.selection.select(row: 0) }
+
+        #expect(view.findNext("world", scrollToResult: false))
+        #expect(view.getSelection() == "world")
+    }
+
     // Test only on macOS due to differences in how frames are handled on mac and iOS
     @Test func testMouseHitCorrectWhenScrolled() {
         let view = TerminalView(frame: CGRect(origin: .zero, size: .init(width: 10, height: 10)))
 
         for _ in 0..<100 {
-            view.terminal.feed (text: "12345")
+            view.feed (text: "12345")
         }
 
         // Scroll all the way down, check the bottom-left corner
@@ -83,13 +107,13 @@ final class SelectionTests: TerminalDelegate {
     @Test @MainActor func testLinefeedPreservesScrolledViewportUntilInputOrBottom() {
         let view = TerminalView(frame: CGRect(origin: .zero, size: .init(width: 120, height: 80)))
         view.resize(cols: 8, rows: 3)
-        view.getTerminal().changeScrollback(50)
+        view.changeScrollback(50)
 
         for index in 0..<10 {
             view.feed(text: "L\(index)\r\n")
         }
 
-        let terminal = view.getTerminal()
+        let terminal: Terminal = view.terminal
         let initialBottom = max(0, terminal.displayBuffer.lines.count - terminal.displayBuffer.rows)
         let scrolledRow = max(0, initialBottom - 2)
 
@@ -118,31 +142,52 @@ final class SelectionTests: TerminalDelegate {
         let view = TerminalView(frame: CGRect(origin: .zero, size: .init(width: 400, height: 100)))
 
         for i in 0..<30 {
-            view.terminal.feed(text: "line \(i)\r\n")
+            view.feed(text: "line \(i)\r\n")
         }
 
-        let bottom = view.terminal.displayBuffer.yDisp
+        let bottom = view.withTerminal { $0.displayBuffer.yDisp }
         let target = max(0, bottom - 3)
         view.scrollTo(row: target)
 
-        #expect(view.terminal.userScrolling)
-        view.terminal.feed(text: "incoming\r\n")
-        #expect(view.terminal.displayBuffer.yDisp == target)
+        #expect(view.withTerminal { $0.userScrolling })
+        view.feed(text: "incoming\r\n")
+        #expect(view.withTerminal { $0.displayBuffer.yDisp } == target)
 
-        view.scrollTo(row: view.terminal.displayBuffer.yBase)
-        #expect(!view.terminal.userScrolling)
+        let yBase = view.withTerminal { $0.displayBuffer.yBase }
+        view.scrollTo(row: yBase)
+        #expect(!view.withTerminal { $0.userScrolling })
+    }
+
+    @Test func testPastedTextScrollsToCaretLikeTypedText() {
+        let view = TerminalView(frame: CGRect(origin: .zero, size: .init(width: 400, height: 100)))
+
+        for i in 0..<30 {
+            view.feed(text: "line \(i)\r\n")
+        }
+
+        view.scrollTo(row: 0)
+        view.insertText("x", replacementRange: NSRange(location: 0, length: 0))
+        let typedTextPosition = view.withTerminal { $0.displayBuffer.yDisp }
+
+        view.scrollTo(row: 0)
+        view.insertText(
+            "pasted text",
+            replacementRange: NSRange(location: 0, length: 0),
+            isPaste: true)
+
+        #expect(view.withTerminal { $0.displayBuffer.yDisp } == typedTextPosition)
+        #expect(!view.withTerminal { $0.userScrolling })
     }
 
     @Test func testZeroSizedResizeDoesNotChangeTerminalDimensions() {
         let view = TerminalView(frame: CGRect(origin: .zero, size: .init(width: 320, height: 160)))
-        let originalCols = view.terminal.cols
-        let originalRows = view.terminal.rows
+        let (originalCols, originalRows) = view.withTerminal { ($0.cols, $0.rows) }
 
         let changed = view.processSizeChange(newSize: .zero)
 
         #expect(!changed)
-        #expect(view.terminal.cols == originalCols)
-        #expect(view.terminal.rows == originalRows)
+        #expect(view.withTerminal { $0.cols } == originalCols)
+        #expect(view.withTerminal { $0.rows } == originalRows)
     }
 
     @Test func testScrollerStyleDefaultsToSystemPreference() {
@@ -173,47 +218,84 @@ final class SelectionTests: TerminalDelegate {
         #expect(view.scrollerStyle == preferredStyle)
     }
 
+    /// The overlay scroller's product behavior (adjudication 6): faded, it
+    /// is invisible and does not take pointer input; revealed, it hit-tests,
+    /// drives scrolling and tracks the position, without changing columns.
     @MainActor
     @Test func testOverlayScrollerStaysAttachedWhileFadedOut() throws {
         let view = TerminalView(frame: CGRect(origin: .zero, size: .init(width: 120, height: 80)))
         view.resize(cols: 12, rows: 4)
-        view.getTerminal().changeScrollback(100)
+        view.changeScrollback(100)
 
         for index in 0..<20 {
             view.feed(text: "L\(index)\r\n")
         }
         view.scrollToBottom()
         view.scrollerStyle = .overlay
+        view.layoutSubtreeIfNeeded()
+        let cols = view.terminalDimensions.cols
 
         let scroller = try #require(view.subviews.compactMap { $0 as? NSScroller }.first)
         #expect(view.canScroll)
-        #expect(!scroller.isHidden)
-        #expect(scroller.alphaValue == 0)
-        #expect(!scroller.isEnabled)
+        let edge = CGPoint(x: scroller.frame.midX, y: scroller.frame.midY)
+        // Faded out: invisible and transparent to the pointer.
+        #expect(scroller.isHidden || scroller.alphaValue == 0)
+        #expect(view.hitTest(edge) !== scroller)
+
+        // Revealed: the scroller takes the pointer and drives scrolling.
+        view.applyScrollerState(.init(isEnabled: true, doubleValue: 1, knobProportion: 0.2))
+        view.showOverlayScroller()
+        view.layoutSubtreeIfNeeded()
+        #expect(view.hitTest(CGPoint(x: scroller.frame.midX, y: scroller.frame.midY)) === scroller)
+        #expect(scroller.isEnabled)
+        #expect(scroller.target === view)
+        #expect(scroller.action == #selector(TerminalView.scrollerActivated))
+        view.scrollTo(row: 0)
+        // The scroller follows the position from the frame's side effects.
+        view.frameTick()
+        #expect(scroller.doubleValue == 0)
+        #expect(view.terminalDimensions.cols == cols, "an overlay scroller must not take columns")
     }
+
 
     @Test func testSelectionColorsOverrideCellAndDecorationColors() {
         let view = TerminalView(frame: CGRect(origin: .zero, size: .init(width: 320, height: 160)))
         let selectionBackground = NSColor(srgbRed: 0, green: 166.0 / 255.0, blue: 178.0 / 255.0, alpha: 1.0)
         let selectionForeground = NSColor.black
 
+        func matchesSRGB(_ value: Any?, _ expected: NSColor) -> Bool {
+            guard let actual = value as? NSColor,
+                  let actual = actual.usingColorSpace(.sRGB),
+                  let expected = expected.usingColorSpace(.sRGB) else {
+                return false
+            }
+            return abs(actual.redComponent - expected.redComponent) < 0.000_001
+                && abs(actual.greenComponent - expected.greenComponent) < 0.000_001
+                && abs(actual.blueComponent - expected.blueComponent) < 0.000_001
+                && abs(actual.alphaComponent - expected.alphaComponent) < 0.000_001
+        }
+
         #expect(view.selectedTextBackgroundColor.isEqual(selectionBackground))
         #expect(view.selectedTextForegroundColor.isEqual(selectionForeground))
 
-        view.terminal.feed(text: "\u{001B}[31;44;4;9mX")
-        view.selection.setSelection(start: Position(col: 0, row: 0), end: Position(col: 1, row: 0))
+        view.feed(text: "\u{001B}[31;44;4;9mX")
+        view.withTerminal { _ in
+            view.selection.setSelection(start: Position(col: 0, row: 0), end: Position(col: 1, row: 0))
+        }
 
-        let renderedLine = view.buildAttributedString(
-            row: 0,
-            line: view.terminal.displayBuffer.lines[0],
-            cols: view.terminal.cols
-        )
+        let renderedLine = view.withTerminal { terminal in
+            view.buildAttributedStringLocked(
+                row: 0,
+                line: terminal.displayBuffer.lines[0],
+                cols: terminal.cols
+            )
+        }
         let attributes = renderedLine.segments[0].attributedString.attributes(at: 0, effectiveRange: nil)
 
         #expect((attributes[.selectionBackgroundColor] as? NSColor)?.isEqual(selectionBackground) == true)
-        #expect((attributes[.foregroundColor] as? NSColor)?.isEqual(selectionForeground) == true)
-        #expect((attributes[.underlineColor] as? NSColor)?.isEqual(selectionForeground) == true)
-        #expect((attributes[.strikethroughColor] as? NSColor)?.isEqual(selectionForeground) == true)
+        #expect(matchesSRGB(attributes[.foregroundColor], selectionForeground))
+        #expect(matchesSRGB(attributes[.underlineColor], selectionForeground))
+        #expect(matchesSRGB(attributes[.strikethroughColor], selectionForeground))
     }
 #endif
 
@@ -252,6 +334,55 @@ final class SelectionTests: TerminalDelegate {
         #expect(selection.end.row == 1)
         #expect(selection.start.col == 0)
         #expect(selection.end.col == terminal.cols - 1)
+    }
+
+    @Test func rowDragExtendsToCompleteRows() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 10, rows: 5))
+        let selection = SelectionService(terminal: terminal)
+
+        selection.select(row: 1)
+        selection.dragExtend(bufferPosition: Position(col: 4, row: 3))
+
+        #expect(selection.start == Position(col: 0, row: 1))
+        #expect(selection.end == Position(col: 9, row: 3))
+        #expect(selection.selectionMode == .row)
+    }
+
+    @Test func rowDragKeepsItsAnchorWhenDirectionChanges() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 10, rows: 5))
+        let selection = SelectionService(terminal: terminal)
+
+        selection.select(row: 2)
+        selection.dragExtend(bufferPosition: Position(col: 4, row: 0))
+        #expect(selection.start == Position(col: 0, row: 0))
+        #expect(selection.end == Position(col: 9, row: 2))
+
+        selection.dragExtend(bufferPosition: Position(col: 4, row: 4))
+        #expect(selection.start == Position(col: 0, row: 2))
+        #expect(selection.end == Position(col: 9, row: 4))
+    }
+
+    @Test func rowShiftExtendUsesCompleteRows() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 10, rows: 5))
+        let selection = SelectionService(terminal: terminal)
+
+        selection.select(row: 2)
+        selection.shiftExtend(bufferPosition: Position(col: 4, row: 0))
+
+        #expect(selection.start == Position(col: 0, row: 0))
+        #expect(selection.end == Position(col: 9, row: 2))
+    }
+
+    @Test func rowPivotExtendUsesCompleteRows() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 10, rows: 5))
+        let selection = SelectionService(terminal: terminal)
+
+        selection.select(row: 2)
+        selection.pivot = selection.end
+        selection.pivotExtend(bufferPosition: Position(col: 4, row: 0))
+
+        #expect(selection.start == Position(col: 0, row: 0))
+        #expect(selection.end == Position(col: 9, row: 2))
     }
 
     /// Test select all
@@ -432,6 +563,18 @@ final class SelectionTests: TerminalDelegate {
         let text = selection.getSelectedText()
         #expect(text.contains("ABCDEFGHIJKLMNO"))
         #expect(!text.contains("ABCDEFGHIJ\nKLMNO"))
+    }
+
+    @Test func testSelectedColumnsRangeRejectsRowsOutsideMultiRowSelection() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 10, rows: 5))
+        let selection = SelectionService(terminal: terminal)
+        selection.setSelection(
+            start: Position(col: 2, row: 1),
+            end: Position(col: 4, row: 3))
+
+        #expect(selection.selectedColumnsRange(row: 0, cols: 10) == nil)
+        #expect(selection.selectedColumnsRange(row: 4, cols: 10) == nil)
+        #expect(selection.selectedColumnsRange(row: 2, cols: 10) == 0..<10)
     }
 
     /// Test word selection at word boundaries

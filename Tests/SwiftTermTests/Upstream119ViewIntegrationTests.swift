@@ -8,10 +8,13 @@
 //
 //  Every blink test drives the phase change through production code — either
 //  the `setTextBlinkVisibleForTesting` hook or the real blink `Timer` fired
-//  synchronously — and then observes what the renderers actually consume
-//  (`cachedLineInfo`, CG pixels, CG invalidation rects, Metal draw data), never
-//  a fresh `buildAttributedString` alone. A fresh build is used only as the
-//  control proving the phase really is hidden.
+//  synchronously — and then observes what the renderers actually consume. On
+//  v1.99.2 that is the frame snapshot built through the view's own
+//  `SnapshotTextBuilder` (whose attribute cache replaced the fork's line-info
+//  cache), CG pixels after a frame tick, CG invalidation rects from a frame
+//  tick, and Metal draw data compared with a from-scratch rebuild. A build
+//  through a fresh text builder is used only as the control proving the phase
+//  really is hidden.
 //
 #if os(macOS)
 import AppKit
@@ -71,29 +74,56 @@ final class Upstream119ViewIntegrationTests {
 
     // MARK: - Helpers
 
-    /// The first rendered segment of `row` as the renderers see it (through the
-    /// line-info cache), with the attributes of its first cell.
-    private func cachedFirstCell(_ view: TerminalView, row: Int)
+    /// The current frame snapshot and the render context the renderers use.
+    private func frameSnapshot(_ view: TerminalView) -> (TerminalSnapshot, SnapshotRenderContext) {
+        let snapshot = TerminalSnapshot()
+        let viewState = FrameViewState(view: view)
+        view.withTerminal { terminal in
+            _ = snapshot.refresh(terminal: terminal, viewState: viewState,
+                                 selection: SnapshotSelectionState(selection: view.selection))
+        }
+        return (snapshot, SnapshotRenderContext(viewState: viewState, snapshot: snapshot))
+    }
+
+    private func firstCell(_ view: TerminalView, row: Int, builder: SnapshotTextBuilder)
         -> (text: String, attributes: [NSAttributedString.Key: Any])?
     {
-        let buffer = view.terminal.displayBuffer
-        let info = view.cachedLineInfo(row: row, line: buffer.lines[row], cols: view.terminal.cols)
+        let (snapshot, context) = frameSnapshot(view)
+        let index = row - snapshot.firstRow
+        guard index >= 0, index < snapshot.rows.count else { return nil }
+        let info = builder.buildAttributedString(row: snapshot.rows[index], absoluteRow: row,
+                                                 context: context)
         guard let segment = info.segments.first(where: { $0.column == 0 }),
               segment.attributedString.length > 0 else { return nil }
         return (segment.attributedString.string,
                 segment.attributedString.attributes(at: 0, effectiveRange: nil))
     }
 
-    /// Same as `cachedFirstCell` but bypassing the cache (the control).
+    /// The first rendered segment of `row` as the CG renderer builds it,
+    /// through the view's long-lived text builder and its attribute cache.
+    private func cachedFirstCell(_ view: TerminalView, row: Int)
+        -> (text: String, attributes: [NSAttributedString.Key: Any])?
+    {
+        firstCell(view, row: row, builder: view.textBuilder)
+    }
+
+    /// Same as `cachedFirstCell` but through a fresh builder (the control).
     private func freshFirstCell(_ view: TerminalView, row: Int)
         -> (text: String, attributes: [NSAttributedString.Key: Any])?
     {
-        let buffer = view.terminal.displayBuffer
-        let info = view.buildAttributedString(row: row, line: buffer.lines[row], cols: view.terminal.cols)
-        guard let segment = info.segments.first(where: { $0.column == 0 }),
-              segment.attributedString.length > 0 else { return nil }
-        return (segment.attributedString.string,
-                segment.attributedString.attributes(at: 0, effectiveRange: nil))
+        firstCell(view, row: row, builder: SnapshotTextBuilder())
+    }
+
+    /// Runs main-queue work the terminal callbacks queued (`onMain`). A
+    /// nested run loop cannot do this: the test itself runs on the main queue.
+    private func drainMainQueue() async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+    }
+
+    private func reverseColors(_ view: TerminalView) -> Bool {
+        view.withTerminal { $0.reverseColors }
     }
 
     /// Hosts `view` in a window and makes the blink lifecycle eligible to run a
@@ -108,6 +138,8 @@ final class Upstream119ViewIntegrationTests {
     }
 
     private func render(_ view: TerminalView) -> Data? {
+        // Drawing reads the frame snapshot; refresh it first.
+        view.frameTick()
         guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
         view.cacheDisplay(in: view.bounds, to: rep)
         guard let base = rep.bitmapData else { return nil }
@@ -127,7 +159,7 @@ final class Upstream119ViewIntegrationTests {
     /// below against a false failure from a phase that never changed.
     @Test func blinkHookHiddenPhaseIsObservableWithoutCache() throws {
         let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 400, height: 120))
-        view.terminal.feed(text: blinkLine)
+        view.feed(text: blinkLine)
         let visible = try #require(freshFirstCell(view, row: 0))
         #expect(visible.text.first == "B")
         #expect(visible.attributes[.underlineStyle] != nil)
@@ -142,20 +174,19 @@ final class Upstream119ViewIntegrationTests {
         #expect(hidden.attributes[.strikethroughStyle] == nil)
     }
 
-    /// Warm `cachedLineInfo` in the visible phase, toggle hidden with the hook:
-    /// what the renderers read must be the hidden phase, and a neighboring
-    /// non-blink row must keep its cache entry (no global cache reset).
+    /// Warm the renderer's text builder in the visible phase, toggle hidden
+    /// with the hook: what the renderers read must be the hidden phase.
+    /// (The fork's neighbor-row cache-retention checks have no v1.99.2
+    /// counterpart: the CG text builder has no per-row cache, and a blink
+    /// phase change is a frame-style change that repaints the view.)
     @Test func blinkHookToggleIsVisibleThroughCachedLineInfo() throws {
         let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 400, height: 120))
-        view.terminal.feed(text: "plain neighbor\r\n" + blinkLine)
+        view.feed(text: "plain neighbor\r\n" + blinkLine)
         let blinkRow = 1, neighborRow = 0
 
         let warm = try #require(cachedFirstCell(view, row: blinkRow))
         #expect(warm.text.first == "B")
-        _ = cachedFirstCell(view, row: neighborRow)
-        let neighborLine = view.terminal.displayBuffer.lines[neighborRow]
-        let cacheGenerationBefore = view.lineInfoCacheGeneration
-        let neighborInvalidationBefore = view.lineInfoInvalidationGeneration(for: neighborLine)
+        let neighborBefore = try #require(cachedFirstCell(view, row: neighborRow))
 
         view.setTextBlinkVisibleForTesting(false)
         #expect(view.textBlinkVisible == false)
@@ -166,10 +197,9 @@ final class Upstream119ViewIntegrationTests {
         #expect(hidden.attributes[.underlineStyle] == nil, "stale underline in hidden phase")
         #expect(hidden.attributes[.strikethroughStyle] == nil, "stale strikethrough in hidden phase")
 
-        // The neighbor must stay cached: blink is a per-row invalidation.
-        #expect(view.lineInfoCacheGeneration == cacheGenerationBefore)
-        #expect(view.lineInfoCache[neighborRow] != nil)
-        #expect(view.lineInfoInvalidationGeneration(for: neighborLine) == neighborInvalidationBefore)
+        // The neighbor row's rendering is unaffected by the phase.
+        let neighborAfter = try #require(cachedFirstCell(view, row: neighborRow))
+        #expect(neighborAfter.text == neighborBefore.text)
 
         // And back to visible.
         view.setTextBlinkVisibleForTesting(true)
@@ -183,7 +213,7 @@ final class Upstream119ViewIntegrationTests {
     @Test(.enabled(if: !reduceMotion, "Reduce Motion disables the blink timer"))
     func blinkTimerToggleIsVisibleThroughCachedLineInfo() throws {
         let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 400, height: 120))
-        view.terminal.feed(text: "plain neighbor\r\n" + blinkLine)
+        view.feed(text: "plain neighbor\r\n" + blinkLine)
         let window = hostForBlinking(view)
         defer { window.contentView = nil }
         let timer = try #require(view.textBlinkTimer, "blink timer must start for a hosted, active view")
@@ -191,8 +221,7 @@ final class Upstream119ViewIntegrationTests {
 
         let warm = try #require(cachedFirstCell(view, row: 1))
         #expect(warm.text.first == "B")
-        _ = cachedFirstCell(view, row: 0)
-        let cacheGenerationBefore = view.lineInfoCacheGeneration
+        let neighborBefore = try #require(cachedFirstCell(view, row: 0))
 
         timer.fire()
         #expect(view.textBlinkVisible == false, "timer fire must hide")
@@ -201,8 +230,7 @@ final class Upstream119ViewIntegrationTests {
         let hidden = try #require(cachedFirstCell(view, row: 1))
         #expect(hidden.text.first == " ", "cachedLineInfo served stale blink phase: \(hidden.text.debugDescription)")
         #expect(hidden.attributes[.underlineStyle] == nil, "stale underline in hidden phase")
-        #expect(view.lineInfoCacheGeneration == cacheGenerationBefore)
-        #expect(view.lineInfoCache[0] != nil, "non-blink neighbor must stay cached")
+        #expect(cachedFirstCell(view, row: 0)?.text == neighborBefore.text, "non-blink neighbor unaffected")
     }
 
     /// CG pixels: a view whose cache was warmed in the visible phase and then
@@ -211,7 +239,7 @@ final class Upstream119ViewIntegrationTests {
     @Test func blinkHiddenPhaseCGPixelsMatchColdRender() throws {
         func makeView() -> TerminalView {
             let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 400, height: 120))
-            view.terminal.feed(text: "plain neighbor\r\n" + blinkLine + "\(esc)[?25l")
+            view.feed(text: "plain neighbor\r\n" + blinkLine + "\(esc)[?25l")
             return view
         }
         let warmed = makeView()
@@ -235,31 +263,37 @@ final class Upstream119ViewIntegrationTests {
         -> (BlinkInvalidationCapturingView, NSWindow?)
     {
         let view = BlinkInvalidationCapturingView(frame: CGRect(x: 0, y: 0, width: 640, height: 320))
-        let terminal: Terminal = view.terminal
-        for i in 0..<screenRow { terminal.feed(text: "pre \(i)\r\n") }
-        terminal.feed(text: blinkLine + "\r\n")
-        for i in 0..<(terminal.rows * 3) { terminal.feed(text: "line \(i)\r\n") }
+        let rows = view.terminalDimensions.rows
+        for i in 0..<screenRow { view.feed(text: "pre \(i)\r\n") }
+        view.feed(text: blinkLine + "\r\n")
+        for i in 0..<(rows * 3) { view.feed(text: "line \(i)\r\n") }
         let window = hosted ? hostForBlinking(view) : nil
-        view.updateDisplay()
+        view.frameTick()
         view.scrollTo(row: 0)
-        view.updateDisplay()
-        terminal.clearUpdateRange()
+        view.frameTick()
+        view.withTerminal { $0.clearUpdateRange() }
         view.invalidated.removeAll()
         return (view, window)
     }
 
-    /// Control for the helper: the fork's own viewport-row invalidation
-    /// (hover path) hits the band the blink test expects.
+    /// Control for the helper: a highlight change on the blink row's viewport
+    /// row (the hover path) schedules a frame that repaints that band, without
+    /// a live-screen core mark.
     @Test func scrolledBackViewportRowControlHitsBand() {
         let screenRow = 2
         let (view, _) = makeDeepScrolledBackBlinkView(screenRow: screenRow, hosted: false)
         let buffer = view.terminal.buffer
         #expect(buffer.yBase - buffer.yDisp >= view.terminal.rows)
         #expect(view.visibleBlinkRows() == [buffer.yDisp + screenRow])
-        view.invalidateAppearanceRow(buffer.yDisp + screenRow)
+        let range = [Terminal.LinkMatch.RowRange(row: buffer.yDisp + screenRow, range: 0..<5)]
+        view.linkHighlightRange = range
+        view.invalidateLinkHighlight(oldRange: nil, newRange: range)
+        #expect(view.withTerminal { $0.getUpdateRange() } == nil)
+        view.frameTick()
         let band = rowBand(view, screenRow: screenRow)
         #expect(view.invalidated.contains { $0.minY <= band.bottom && $0.maxY >= band.top })
     }
+
 
     /// Real timer path: deep scrolled back, fire the blink timer, run one
     /// display tick. The blink row's viewport band must be invalidated.
@@ -277,7 +311,7 @@ final class Upstream119ViewIntegrationTests {
 
         timer.fire()
         #expect(view.textBlinkVisible == false)
-        view.updateDisplay()
+        view.frameTick()
         #expect(view.textBlinkVisible == false, "setup: display tick must not reset the phase")
 
         let band = rowBand(view, screenRow: screenRow)
@@ -297,7 +331,7 @@ final class Upstream119ViewIntegrationTests {
         let screenRow = 2
         let (view, _) = makeDeepScrolledBackBlinkView(screenRow: screenRow, hosted: false)
         view.setTextBlinkVisibleForTesting(false)
-        view.updateDisplay()
+        view.frameTick()
         let band = rowBand(view, screenRow: screenRow)
         let repainted = view.invalidated.contains { $0.minY <= band.bottom && $0.maxY >= band.top }
         #expect(repainted, "blink hook while scrolled back invalidated \(view.invalidated); row band [\(band.bottom), \(band.top)]")
@@ -308,15 +342,15 @@ final class Upstream119ViewIntegrationTests {
     @Test(.enabled(if: !reduceMotion, "Reduce Motion disables the blink timer"))
     func blinkTimerPinnedInvalidatesRow() throws {
         let view = BlinkInvalidationCapturingView(frame: CGRect(x: 0, y: 0, width: 640, height: 320))
-        view.terminal.feed(text: "a\r\nb\r\n" + blinkLine + "\r\n")
+        view.feed(text: "a\r\nb\r\n" + blinkLine + "\r\n")
         let window = hostForBlinking(view)
         defer { window.contentView = nil }
-        view.updateDisplay()
-        view.terminal.clearUpdateRange()
+        view.frameTick()
+        view.withTerminal { $0.clearUpdateRange() }
         view.invalidated.removeAll()
         let timer = try #require(view.textBlinkTimer)
         timer.fire()
-        view.updateDisplay()
+        view.frameTick()
         let band = rowBand(view, screenRow: 2)
         #expect(view.invalidated.contains { $0.minY <= band.bottom && $0.maxY >= band.top },
                 "invalidated \(view.invalidated)")
@@ -324,82 +358,46 @@ final class Upstream119ViewIntegrationTests {
 
     // MARK: - (3) Metal draw data across the blink phase (A3)
 
-#if DEBUG && canImport(MetalKit)
-    private func makeMetalHarness() -> (TerminalView, MetalTerminalRenderer) {
-        let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
-        view.resize(cols: 40, rows: 12)
-        view.frame.size = CGSize(width: view.cellDimension.width * 40,
-                                 height: view.cellDimension.height * 12)
-        let renderer = MetalTerminalRenderer(debugTerminalView: view)
-        view.metalRenderer = renderer
-        return (view, renderer)
+#if canImport(MetalKit)
+    // Incremental Metal draw data must equal a from-scratch rebuild of the
+    // same state (`MetalRowCacheTests.Harness.freshFrame`), the v1.99.2 seam
+    // for the fork's optimized-vs-ground-truth draw snapshot.
+    private func glyphBytes(_ frame: MetalRowCacheTests.DrawnFrame, row: Int) -> [UInt8]? {
+        row < frame.rows.count ? frame.rows[row] : nil
     }
 
-    private func transferTerminalDirtyRange(to view: TerminalView) {
-        let terminal = view.terminal!
-        guard let (rowStart, rowEnd) = terminal.getUpdateRange() else {
-            view.setMetalDirtyRange(nil)
-            return
-        }
-        let buffer = terminal.displayBuffer
-        let maxRow = buffer.lines.count - 1
-        let start = max(0, min(buffer.yDisp + rowStart, maxRow))
-        let end = max(0, min(buffer.yDisp + rowEnd, maxRow))
-        view.setMetalDirtyRange(start <= end ? start...end : nil)
-        terminal.clearUpdateRange()
-    }
-
-    /// Ground truth for the current phase: drop both the view line-info cache
-    /// and the Metal row cache, then build.
-    private func groundTruth(_ view: TerminalView, _ renderer: MetalTerminalRenderer) -> MetalRendererDebugDrawSnapshot {
-        view.resetLineInfoCache()
-        return renderer.debugBuildSnapshot(scale: 1, forceFullRebuild: true)
-    }
-
-    private func glyphCount(_ snapshot: MetalRendererDebugDrawSnapshot, row: Int) -> Int {
-        guard let r = snapshot.rows.first(where: { $0.row == row }) else { return -1 }
-        return r.glyphCellsGray.count + r.glyphCellsColor.count
-    }
-
-    @Test func metalDrawDataTracksBlinkHookPhase() throws {
-        let (view, renderer) = makeMetalHarness()
-        view.terminal.feed(text: "plain neighbor\r\n" + blinkLine)
-        transferTerminalDirtyRange(to: view)
-        let visible = renderer.debugBuildSnapshot(scale: 1)
+    @Test(.enabled(if: MetalRowCacheTests.metalIsUsable, "needs Metal"))
+    func metalDrawDataTracksBlinkHookPhase() async throws {
+        let harness = try #require(MetalRowCacheTests.Harness(cols: 40, rows: 12))
+        let view = harness.view
+        view.feed(text: "plain neighbor\r\n" + blinkLine)
+        let visible = try #require(await harness.frame())
 
         view.setTextBlinkVisibleForTesting(false)
-        transferTerminalDirtyRange(to: view)
-        renderer.debugResetMetrics()
-        let optimized = renderer.debugBuildSnapshot(scale: 1)
-        let metrics = renderer.debugMetricsSnapshot()
-        let truth = groundTruth(view, renderer)
+        let optimized = try #require(await harness.frame())
+        let truth = try #require(await harness.freshFrame())
 
-        print("UPSTREAM119_METAL_BLINK_HOOK rowsRebuilt=\(metrics.rowsRebuilt) " +
-              "glyphs visible=\(glyphCount(visible, row: 1)) optimized=\(glyphCount(optimized, row: 1)) " +
-              "truth=\(glyphCount(truth, row: 1))")
-        #expect(glyphCount(truth, row: 1) < glyphCount(visible, row: 1), "control: hidden phase must drop glyphs")
-        #expect(glyphCount(truth, row: 0) == glyphCount(visible, row: 0), "control: neighbor unaffected")
-        #expect(optimized == truth, "Metal draw data kept the stale blink phase")
+        #expect(truth.rows != visible.rows, "control: hidden phase must change draw data")
+        #expect(optimized.rows == truth.rows, "Metal draw data kept the stale blink phase")
     }
 
-    @Test(.enabled(if: !reduceMotion, "Reduce Motion disables the blink timer"))
-    func metalDrawDataTracksBlinkTimerPhase() throws {
-        let (view, renderer) = makeMetalHarness()
-        view.terminal.feed(text: "plain neighbor\r\n" + blinkLine)
+    @Test(.enabled(if: MetalRowCacheTests.metalIsUsable && !reduceMotion, "needs Metal; Reduce Motion disables the blink timer"))
+    func metalDrawDataTracksBlinkTimerPhase() async throws {
+        let harness = try #require(MetalRowCacheTests.Harness(cols: 40, rows: 12))
+        let view = harness.view
+        view.feed(text: "plain neighbor\r\n" + blinkLine)
         let window = hostForBlinking(view)
         defer { window.contentView = nil }
         let timer = try #require(view.textBlinkTimer)
-        transferTerminalDirtyRange(to: view)
-        let visible = renderer.debugBuildSnapshot(scale: 1)
+        let visible = try #require(await harness.frame())
 
         timer.fire()
         #expect(view.textBlinkVisible == false)
-        transferTerminalDirtyRange(to: view)
-        let optimized = renderer.debugBuildSnapshot(scale: 1)
-        let truth = groundTruth(view, renderer)
+        let optimized = try #require(await harness.frame())
+        let truth = try #require(await harness.freshFrame())
 
-        #expect(glyphCount(truth, row: 1) < glyphCount(visible, row: 1), "control: hidden phase must drop glyphs")
-        #expect(optimized == truth, "Metal draw data kept the stale blink phase (timer path)")
+        #expect(truth.rows != visible.rows, "control: hidden phase must change draw data")
+        #expect(optimized.rows == truth.rows, "Metal draw data kept the stale blink phase (timer path)")
     }
 #endif
 
@@ -470,19 +468,22 @@ final class Upstream119ViewIntegrationTests {
     /// CG DECSCNM with translucent themes, including a theme switch while
     /// reversed: the swap follows the new theme, and reverse-off lands on the
     /// new theme's background with its alpha.
-    @Test func cgReverseScreenAcrossTranslucentThemeSwitch() throws {
+    @Test func cgReverseScreenAcrossTranslucentThemeSwitch() async throws {
         let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 400, height: 120))
         let dark = translucentDark, light = translucentLight
         install(view, dark: dark, light: light)
 
-        view.terminal.feed(text: "\(esc)[?5h")
-        #expect(view.terminal.reverseColors)
+        view.feed(text: "\(esc)[?5h")
+        await drainMainQueue()
+        #expect(reverseColors(view))
         #expect(layerColor(view)?.rgb == RGBA(dark.foreground).rgb, "reversed layer: \(String(describing: layerColor(view)))")
         print("UPSTREAM119_CG_REVERSE_LAYER_ALPHA \(String(describing: layerColor(view)))")
-        view.terminal.feed(text: "\(esc)[?5l")
+        view.feed(text: "\(esc)[?5l")
+        await drainMainQueue()
         #expect(layerColor(view) == RGBA(dark.background), "control: un-reverse restores theme bg + alpha")
 
-        view.terminal.feed(text: "\(esc)[?5h")
+        view.feed(text: "\(esc)[?5h")
+        await drainMainQueue()
         view.terminalAppearance = .light
         #expect(RGBA(view.effectiveNativeBackgroundColor).rgb == RGBA(light.foreground).rgb)
         #expect(RGBA(view.effectiveNativeForegroundColor) == RGBA(light.background),
@@ -490,7 +491,8 @@ final class Upstream119ViewIntegrationTests {
         #expect(layerColor(view)?.rgb == RGBA(light.foreground).rgb,
                 "theme switch while reversed painted layer \(String(describing: layerColor(view)))")
 
-        view.terminal.feed(text: "\(esc)[?5l")
+        view.feed(text: "\(esc)[?5l")
+        await drainMainQueue()
         #expect(layerColor(view) == RGBA(light.background), "after reverse off: \(String(describing: layerColor(view)))")
     }
 
@@ -500,6 +502,8 @@ final class Upstream119ViewIntegrationTests {
     /// alpha, the host layer stays clear (no double composite), and the
     /// CAMetalLayer composites (`isOpaque == false`), exactly as assigning the
     /// same color through `nativeBackgroundColor`/`backgroundOpacity` would.
+    /// An opaque background is also painted on the host layer, so nothing
+    /// shows through before the Metal surface has a drawable (adjudication 7).
     @Test(.enabled(if: hasMetal, "needs a Metal device"))
     func metalTranslucentThemeAfterOpaqueEnable() throws {
         let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 400, height: 120))
@@ -508,7 +512,7 @@ final class Upstream119ViewIntegrationTests {
         let metalLayer = try #require(view.metalView?.layer)
         // Control: default opaque state under Metal.
         #expect(metalLayer.isOpaque == true)
-        #expect(layerColor(view)?.a == 0)
+        #expect(layerColor(view) == RGBA(view.effectiveNativeBackgroundColor))
 
         let dark = translucentDark, light = translucentLight
         install(view, dark: dark, light: light)
@@ -524,69 +528,95 @@ final class Upstream119ViewIntegrationTests {
         view.lightTheme = opaqueLight
         #expect(RGBA(view.effectiveNativeBackgroundColor) == RGBA(opaqueLight.background))
         #expect(metalLayer.isOpaque == true)
-        #expect(layerColor(view)?.a == 0, "host layer under Metal after opaque theme \(String(describing: layerColor(view)))")
+        #expect(layerColor(view) == RGBA(opaqueLight.background),
+                "host layer under Metal after opaque theme \(String(describing: layerColor(view)))")
     }
 
     @Test(.enabled(if: hasMetal, "needs a Metal device"))
-    func metalReverseScreenAcrossTranslucentThemeSwitch() throws {
+    func metalReverseScreenAcrossTranslucentThemeSwitch() async throws {
         let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 400, height: 120))
         try view.setUseMetal(true)
         defer { try? view.setUseMetal(false) }
         let dark = translucentDark, light = translucentLight
         install(view, dark: dark, light: light)
 
-        view.terminal.feed(text: "\(esc)[?5h")
+        view.feed(text: "\(esc)[?5h")
+        await drainMainQueue()
         #expect(RGBA(view.effectiveNativeBackgroundColor).rgb == RGBA(dark.foreground).rgb)
-        view.terminal.feed(text: "\(esc)[?5l")
+        view.feed(text: "\(esc)[?5l")
+        await drainMainQueue()
         #expect(RGBA(view.effectiveNativeBackgroundColor) == RGBA(dark.background), "control: un-reverse")
 
-        view.terminal.feed(text: "\(esc)[?5h")
-        // Not an isolated control: the theme install above already wrote the
-        // host layer, so this reflects install + DECSCNM.
-        #expect(layerColor(view)?.a == 0, "host layer under Metal after theme install + DECSCNM: \(String(describing: layerColor(view)))")
+        view.feed(text: "\(esc)[?5h")
+        await drainMainQueue()
+        // Reversed, the effective background is the theme's opaque
+        // foreground, so the host layer paints it.
+        #expect(layerColor(view) == RGBA(view.effectiveNativeBackgroundColor),
+                "host layer under Metal after theme install + DECSCNM: \(String(describing: layerColor(view)))")
         view.terminalAppearance = .light
         #expect(RGBA(view.effectiveNativeBackgroundColor).rgb == RGBA(light.foreground).rgb)
         #expect(RGBA(view.effectiveNativeForegroundColor) == RGBA(light.background))
-        #expect(layerColor(view)?.a == 0, "host layer under Metal after reversed theme switch: \(String(describing: layerColor(view)))")
-        view.terminal.feed(text: "\(esc)[?5l")
+        #expect(layerColor(view) == RGBA(view.effectiveNativeBackgroundColor),
+                "host layer under Metal after reversed theme switch: \(String(describing: layerColor(view)))")
+        view.feed(text: "\(esc)[?5l")
+        await drainMainQueue()
         #expect(RGBA(view.effectiveNativeBackgroundColor) == RGBA(light.background),
                 "Metal clear color after reverse off: \(RGBA(view.effectiveNativeBackgroundColor))")
-        #expect(layerColor(view)?.a == 0)
+        #expect(layerColor(view)?.a == 0, "translucent background under Metal must leave the host layer clear")
     }
 #endif
 
     /// Default-color bold under DECSCNM: the custom bold color applies only
     /// when not reversed; reversed swaps the defaults; explicit ANSI is
-    /// unaffected by either. Checked through mapColor and through the cache.
-    @Test func boldDefaultForegroundUnderReverseScreen() throws {
+    /// unaffected by either. Checked through the color map the renderers use
+    /// (the frame render context) and through the rendered attributes.
+    @Test func boldDefaultForegroundUnderReverseScreen() async throws {
         let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 400, height: 120))
         let custom = NSColor(srgbRed: 1, green: 0.2, blue: 0.6, alpha: 1)
+        // Static colors: the dynamic system defaults resolve against the view's
+        // effective appearance in the renderer but the process appearance in
+        // RGBA(), so they disagree whenever the system is in dark mode.
+        view.nativeForegroundColor = NSColor(srgbRed: 0.9, green: 0.85, blue: 0.8, alpha: 1)
+        view.nativeBackgroundColor = NSColor(srgbRed: 0.1, green: 0.12, blue: 0.2, alpha: 1)
         view.nativeBoldForegroundColor = custom
         let fg = RGBA(view.nativeForegroundColor), bg = RGBA(view.nativeBackgroundColor)
-        let ansiBold = RGBA(view.mapColor(color: .ansi256(code: 1), isFg: true, isBold: true))
+        func rendered(_ color: Attribute.Color, isFg: Bool, isBold: Bool) -> RGBA {
+            let (_, context) = frameSnapshot(view)
+            return RGBA(SwiftTerm.mapColor(color: color, isFg: isFg, isBold: isBold, context: context))
+        }
+        let ansiBold = rendered(.ansi256(code: 1), isFg: true, isBold: true)
+        // The renderer rebuilds captured sRGB colors, which can move a channel
+        // by one 8-bit step; a missing swap moves it by far more.
+        func same(_ a: RGBA, _ b: RGBA) -> Bool {
+            abs(a.r - b.r) <= 1 && abs(a.g - b.g) <= 1 && abs(a.b - b.b) <= 1 && a.a == b.a
+        }
 
-        #expect(RGBA(view.mapColor(color: .defaultColor, isFg: true, isBold: true)) == RGBA(custom))
-        #expect(RGBA(view.mapColor(color: .defaultColor, isFg: true, isBold: false)) == fg)
+        #expect(same(rendered(.defaultColor, isFg: true, isBold: true), RGBA(custom)))
+        #expect(same(rendered(.defaultColor, isFg: true, isBold: false), fg))
 
-        view.terminal.feed(text: "\(esc)[1mB\(esc)[0m \(esc)[1;31mR\(esc)[0m")
+        view.feed(text: "\(esc)[1mB\(esc)[0m \(esc)[1;31mR\(esc)[0m")
         let boldAttr = try #require(cachedFirstCell(view, row: 0)?.attributes[.foregroundColor] as? NSColor)
-        #expect(RGBA(boldAttr).rgb == RGBA(custom).rgb)
+        #expect(same(RGBA(boldAttr), RGBA(custom)))
 
-        view.terminal.feed(text: "\(esc)[?5h")
-        #expect(view.terminal.reverseColors)
-        #expect(RGBA(view.mapColor(color: .defaultColor, isFg: true, isBold: true)) == bg,
+        view.feed(text: "\(esc)[?5h")
+        await drainMainQueue()
+        #expect(reverseColors(view))
+        #expect(same(rendered(.defaultColor, isFg: true, isBold: true), bg),
                 "bold default fg under reverse must be the swapped default, not the custom bold color")
-        #expect(RGBA(view.mapColor(color: .defaultColor, isFg: true, isBold: false)) == bg)
-        #expect(RGBA(view.mapColor(color: .defaultColor, isFg: false, isBold: false)) == fg)
-        #expect(RGBA(view.mapColor(color: .ansi256(code: 1), isFg: true, isBold: true)) == ansiBold)
+        #expect(same(rendered(.defaultColor, isFg: true, isBold: false), bg),
+                "reversed default fg \(rendered(.defaultColor, isFg: true, isBold: false)) vs bg \(bg); fg \(fg)")
+        #expect(same(rendered(.defaultColor, isFg: false, isBold: false), fg),
+                "reversed default bg \(rendered(.defaultColor, isFg: false, isBold: false)) vs fg \(fg)")
+        #expect(same(rendered(.ansi256(code: 1), isFg: true, isBold: true), ansiBold))
 
         let reversedAttr = try #require(cachedFirstCell(view, row: 0)?.attributes[.foregroundColor] as? NSColor)
-        #expect(RGBA(reversedAttr).rgb == bg.rgb, "cache served pre-reverse bold color")
+        #expect(same(RGBA(reversedAttr), bg), "cache served pre-reverse bold color")
 
-        view.terminal.feed(text: "\(esc)[?5l")
-        #expect(RGBA(view.mapColor(color: .defaultColor, isFg: true, isBold: true)) == RGBA(custom))
-        #expect(RGBA(view.mapColor(color: .ansi256(code: 1), isFg: true, isBold: true)) == ansiBold)
-        #expect(ansiBold.rgb != RGBA(custom).rgb)
+        view.feed(text: "\(esc)[?5l")
+        await drainMainQueue()
+        #expect(same(rendered(.defaultColor, isFg: true, isBold: true), RGBA(custom)))
+        #expect(same(rendered(.ansi256(code: 1), isFg: true, isBold: true), ansiBold))
+        #expect(!same(ansiBold, RGBA(custom)))
     }
 }
 #endif

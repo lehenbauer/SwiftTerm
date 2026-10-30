@@ -5,6 +5,7 @@
 //
 //  Created by Miguel de Icaza on 4/21/20.
 //
+#if !SWIFTTERM_EMBEDDED
 #if os(macOS) || os(iOS) || os(visionOS)
 import Foundation
 import CoreGraphics
@@ -18,6 +19,32 @@ import ImageIO
 import SwiftUI
 
 let SwiftTermUnderlineStyleKey = NSAttributedString.Key("SwiftTermUnderlineStyle")
+/// Marks a run whose terminal cells specify a non-default background.
+let SwiftTermExplicitBackgroundKey = NSAttributedString.Key("SwiftTermExplicitBackground")
+/// Carries a ``TerminalGlyphPlacementPolicy`` on runs whose font is a host
+/// glyph fallback, so both draw paths can apply the placement to each glyph.
+let SwiftTermGlyphPolicyKey = NSAttributedString.Key("SwiftTermGlyphPolicy")
+
+private func cellPixelDimension(_ points: CGFloat, scale: CGFloat) -> Int {
+    let value = (points * scale).rounded()
+    guard value.isFinite else { return Int.max }
+    guard value < CGFloat(Int.max) else { return Int.max }
+    return max(1, Int(value))
+}
+
+func terminalPixelCount(cells: Int, cellPoints: CGFloat, scale: CGFloat) -> Int {
+    let cellPixels = cellPixelDimension(cellPoints, scale: scale)
+    let result = cells.multipliedReportingOverflow(by: cellPixels)
+    return result.overflow ? Int.max : max(1, result.partialValue)
+}
+
+func terminalDevicePixelIndex(pointOffset: CGFloat, scale: CGFloat, pixelCount: Int) -> Int {
+    guard pointOffset.isFinite, scale.isFinite, pixelCount > 1 else { return 0 }
+    let value = (pointOffset * scale).rounded(.down)
+    guard value > 0 else { return 0 }
+    guard value < CGFloat(pixelCount) else { return pixelCount - 1 }
+    return Int(value)
+}
 
 #if os(iOS) || os(visionOS)
 import UIKit
@@ -61,7 +88,7 @@ public enum LinkReporting {
 }
 
 /// Controls how links are highlighted and whether click/tap activation is allowed.
-public enum LinkHighlightMode {
+public enum LinkHighlightMode: Sendable {
     /// Underline only when hovering the matched link.
     case hover
     /// Underline only when hovering and the modifier key is pressed.
@@ -70,6 +97,226 @@ public enum LinkHighlightMode {
     case always
     /// Underline explicit links only while the modifier is pressed.
     case alwaysWithModifier
+}
+
+/// A platform font that can cross to the render owner.
+///
+/// This is the only unchecked field in the frame capture. Apple documents
+/// `UIFont` as immutable and safe for use from multiple threads. `NSFont` is
+/// also immutable, and Cocoa permits immutable objects to move between
+/// threads. Copying here prevents a mutable subclass from entering the
+/// wrapper. The wrapper exposes no mutation API.
+struct ImmutableFontReference: @unchecked Sendable {
+    private let storage: TTFont
+
+    @MainActor
+    init (_ font: TTFont) {
+        storage = font.copy() as! TTFont
+    }
+
+    var value: TTFont { storage }
+}
+
+/// The four immutable fonts used by one frame.
+struct FrameFontSet: Sendable {
+    private let normalReference: ImmutableFontReference
+    private let boldReference: ImmutableFontReference
+    private let italicReference: ImmutableFontReference
+    private let boldItalicReference: ImmutableFontReference
+
+    @MainActor
+    init (_ fonts: TerminalView.FontSet) {
+        normalReference = ImmutableFontReference(fonts.normal)
+        boldReference = ImmutableFontReference(fonts.bold)
+        italicReference = ImmutableFontReference(fonts.italic)
+        boldItalicReference = ImmutableFontReference(fonts.boldItalic)
+    }
+
+    var normal: TTFont { normalReference.value }
+    var bold: TTFont { boldReference.value }
+    var italic: TTFont { italicReference.value }
+    var boldItalic: TTFont { boldItalicReference.value }
+
+    /// True when `font` is one of the frame's fonts; false for a font
+    /// CoreText substituted from its fallback cascade.
+    func contains (_ font: CTFont) -> Bool {
+        CFEqual(font, normal) || CFEqual(font, bold)
+            || CFEqual(font, italic) || CFEqual(font, boldItalic)
+    }
+
+    func underlinePosition () -> CGFloat {
+#if os(macOS)
+        normal.underlinePosition
+#else
+        -1.2
+#endif
+    }
+    func underlineThickness () -> CGFloat {
+#if os(macOS)
+        normal.underlineThickness
+#else
+        0.63
+#endif
+    }
+}
+
+/// An sRGB color captured on the main actor and rebuilt by the render owner.
+struct FrameColor: Sendable, Hashable {
+    let red: CGFloat
+    let green: CGFloat
+    let blue: CGFloat
+    let alpha: CGFloat
+
+    @MainActor
+    init (_ color: TTColor, view: TerminalView) {
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var alpha: CGFloat = 1
+#if os(macOS)
+        var converted: TTColor?
+        view.effectiveAppearance.performAsCurrentDrawingAppearance {
+            converted = color.usingColorSpace(.sRGB)
+        }
+        let captured: Bool
+        if let converted {
+            converted.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+            captured = true
+        } else {
+            captured = false
+        }
+#else
+        let resolved = color.resolvedColor(with: view.traitCollection)
+        let captured = resolved.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+#endif
+        if !captured {
+            // Pattern colors and colors in unsupported spaces use a stable
+            // terminal-color fallback. Do this conversion on the main actor.
+#if os(macOS)
+            let fallback = color.getTerminalColor()
+#else
+            let fallback = resolved.getTerminalColor()
+#endif
+            red = CGFloat(fallback.red) / 65535
+            green = CGFloat(fallback.green) / 65535
+            blue = CGFloat(fallback.blue) / 65535
+#if os(macOS)
+            alpha = 1
+#else
+            alpha = resolved.cgColor.alpha
+#endif
+        }
+        self.red = min(max(red, 0), 1)
+        self.green = min(max(green, 0), 1)
+        self.blue = min(max(blue, 0), 1)
+        self.alpha = min(max(alpha, 0), 1)
+    }
+
+    var nativeColor: TTColor {
+#if os(macOS)
+        TTColor.make(red: red, green: green, blue: blue, alpha: alpha)
+#else
+        TTColor(red: red, green: green, blue: blue, alpha: alpha)
+#endif
+    }
+}
+
+/// The colors whose platform resolution can change with the view appearance.
+struct FrameAppearance: Sendable, Equatable {
+    let effectiveForegroundColor: FrameColor
+    let effectiveBackgroundColor: FrameColor
+    let selectedTextBackgroundColor: FrameColor
+    let selectedTextForegroundColor: FrameColor
+    let caretColor: FrameColor
+    let caretTextColor: FrameColor
+    /// The host's link color, or `nil` when links keep their own colors.
+    let linkColor: FrameColor?
+    /// Overrides only the underline of highlighted links.
+    let linkUnderlineColor: FrameColor?
+}
+
+/// Caches main-actor font copies and dynamic-color resolution for frame input.
+///
+/// The cache compares the native inputs on each capture. It rebuilds colors
+/// when the platform appearance or trait collection changes, so callers do not
+/// need a separate invalidation hook for each color setter.
+@MainActor
+final class FrameCaptureCache {
+    private var sourceFonts: [TTFont] = []
+    private var cachedFonts: FrameFontSet?
+    private var sourceColors: [TTColor] = []
+    private var sourceLinkColor: TTColor?
+    private var sourceLinkUnderlineColor: TTColor?
+    private var appearanceSignature = 0
+    private var cachedAppearance: FrameAppearance?
+
+#if DEBUG
+    private(set) var fontRebuildCount = 0
+    private(set) var appearanceRebuildCount = 0
+#endif
+
+    func fonts (for view: TerminalView) -> FrameFontSet {
+        let current = [view.fontSet.normal, view.fontSet.bold,
+                       view.fontSet.italic, view.fontSet.boldItalic]
+        if let cachedFonts,
+           sourceFonts.count == current.count,
+           zip(sourceFonts, current).allSatisfy({ $0.0.isEqual($0.1) }) {
+            return cachedFonts
+        }
+
+        let result = FrameFontSet(view.fontSet)
+        sourceFonts = current
+        cachedFonts = result
+#if DEBUG
+        fontRebuildCount += 1
+#endif
+        return result
+    }
+
+    func appearance (for view: TerminalView) -> FrameAppearance {
+        let current = [
+            view.effectiveNativeForegroundColor,
+            view.effectiveNativeBackgroundColor,
+            view.selectedTextBackgroundColor,
+            view.selectedTextForegroundColor,
+            view.effectiveCaretColor,
+            view.effectiveCaretTextColor
+        ]
+        let linkColor = view.linkColor
+        let linkUnderlineColor = view.linkUnderlineColor
+#if os(macOS)
+        let signature = view.effectiveAppearance.name.rawValue.hashValue
+#else
+        let signature = view.traitCollection.hash
+#endif
+        if let cachedAppearance,
+           appearanceSignature == signature,
+           sourceColors.count == current.count,
+           zip(sourceColors, current).allSatisfy({ $0.0.isEqual($0.1) }),
+           sourceLinkColor?.isEqual(linkColor) ?? (linkColor == nil),
+           sourceLinkUnderlineColor?.isEqual(linkUnderlineColor) ?? (linkUnderlineColor == nil) {
+            return cachedAppearance
+        }
+
+        let result = FrameAppearance(
+            effectiveForegroundColor: FrameColor(current[0], view: view),
+            effectiveBackgroundColor: FrameColor(current[1], view: view),
+            selectedTextBackgroundColor: FrameColor(current[2], view: view),
+            selectedTextForegroundColor: FrameColor(current[3], view: view),
+            caretColor: FrameColor(current[4], view: view),
+            caretTextColor: FrameColor(current[5], view: view),
+            linkColor: linkColor.map { FrameColor($0, view: view) },
+            linkUnderlineColor: linkUnderlineColor.map { FrameColor($0, view: view) })
+        sourceColors = current
+        sourceLinkColor = linkColor
+        sourceLinkUnderlineColor = linkUnderlineColor
+        appearanceSignature = signature
+        cachedAppearance = result
+#if DEBUG
+        appearanceRebuildCount += 1
+#endif
+        return result
+    }
 }
 
 /// A rendered fragment that starts at a specific column and contains a run of
@@ -83,9 +330,6 @@ struct ViewLineSegment {
     /// it belongs to, so glyphs can be positioned by cell (combining marks
     /// share their base's cell instead of shifting the column grid).
     let utf16ToCellOrdinal: [Int]
-    /// True when every cell contributed exactly one UTF-16 unit, so the map
-    /// is the identity and glyph index arithmetic can position runs directly.
-    let utf16IsCellIdentity: Bool
 
     var columnSpan: Int {
         return max(0, characterCount * columnWidth)
@@ -98,21 +342,72 @@ struct ViewLineSegment {
         }
         return max(0, utf16ToCellOrdinal.last ?? 0)
     }
+
+    /// Terminal-cell ordinals covered by a UTF-16 source range. Unlike glyph
+    /// counts, this includes every cell a ligature consumed.
+    func cellOrdinals(in range: CFRange) -> Range<Int> {
+        guard range.length > 0 else { return 0..<0 }
+        let first = cellOrdinal(forUTF16: range.location)
+        let last = cellOrdinal(forUTF16: range.location + range.length - 1)
+        // cellOrdinal clamps out-of-range indices; keep the Range valid.
+        return first..<(max(first, last) + 1)
+    }
 }
 
 /// Attribute key and value pinning CoreText to left-to-right layout. Shared
 /// constants, so adding them to a batch dictionary allocates nothing.
-private let ltrWritingDirectionKey = NSAttributedString.Key(kCTWritingDirectionAttributeName as String)
-private let ltrWritingDirectionValue: [NSNumber] = [NSNumber(value: 2)]
+let ltrWritingDirectionKey = NSAttributedString.Key(kCTWritingDirectionAttributeName as String)
+let ltrWritingDirectionValue: [NSNumber] = [NSNumber(value: 2)]
+/// A left-to-right paragraph. Without it CoreText picks the paragraph
+/// direction from the first strong character, or from the process's default
+/// direction when there is none, and in a right-to-left paragraph it moves
+/// trailing whitespace to the left edge, ahead of the overridden text.
+/// Never mutated after creation, so sharing it across threads is safe.
+nonisolated(unsafe) let ltrParagraphStyle: NSParagraphStyle = {
+    let style = NSMutableParagraphStyle()
+    style.baseWritingDirection = .leftToRight
+    return style
+}()
 
-// Raw attribute keys as NSString, so per-run lookups on the unbridged
-// CTRunGetAttributes dictionary neither bridge the dictionary nor the key.
-private let fontKeyNS = NSAttributedString.Key.font.rawValue as NSString
-private let foregroundKeyNS = NSAttributedString.Key.foregroundColor.rawValue as NSString
-private let backgroundKeyNS = NSAttributedString.Key.backgroundColor.rawValue as NSString
-private let selectionBackgroundKeyNS = NSAttributedString.Key.selectionBackgroundColor.rawValue as NSString
-private let underlineStyleKeyNS = NSAttributedString.Key.underlineStyle.rawValue as NSString
-private let strikethroughStyleKeyNS = NSAttributedString.Key.strikethroughStyle.rawValue as NSString
+/// Checked-Sendable names for the CoreText attributes used by the draw pass.
+fileprivate struct CoreTextRunAttributeNames: Sendable {
+    let font = NSAttributedString.Key.font.rawValue
+    let foreground = NSAttributedString.Key.foregroundColor.rawValue
+    let background = NSAttributedString.Key.backgroundColor.rawValue
+    let selectionBackground = NSAttributedString.Key.selectionBackgroundColor.rawValue
+    let explicitBackground = SwiftTermExplicitBackgroundKey.rawValue
+    let underlineStyle = NSAttributedString.Key.underlineStyle.rawValue
+    let strikethroughStyle = NSAttributedString.Key.strikethroughStyle.rawValue
+    let glyphPolicy = SwiftTermGlyphPolicyKey.rawValue
+}
+
+fileprivate let coreTextRunAttributeNames = CoreTextRunAttributeNames()
+
+/// Owner-local bridged keys for unbridged CoreText run dictionaries.
+///
+/// Each Core Graphics renderer creates these immutable keys once. They do not
+/// cross a concurrency boundary, and keyed lookups do not bridge per run.
+fileprivate struct CoreTextRunAttributeKeys {
+    let font: NSString
+    let foreground: NSString
+    let background: NSString
+    let selectionBackground: NSString
+    let explicitBackground: NSString
+    let underlineStyle: NSString
+    let strikethroughStyle: NSString
+    let glyphPolicy: NSString
+
+    init(names: CoreTextRunAttributeNames) {
+        font = names.font as NSString
+        foreground = names.foreground as NSString
+        background = names.background as NSString
+        selectionBackground = names.selectionBackground as NSString
+        explicitBackground = names.explicitBackground as NSString
+        underlineStyle = names.underlineStyle as NSString
+        strikethroughStyle = names.strikethroughStyle as NSString
+        glyphPolicy = names.glyphPolicy as NSString
+    }
+}
 
 /// Values the draw passes need from a CTRun, extracted once per run so both
 /// passes share them and the full attribute dictionary is never bridged on
@@ -122,89 +417,77 @@ struct PreparedRun {
     let font: TTFont?
     let foregroundColor: TTColor?
     let backgroundColor: TTColor?
+    let hasExplicitBackground: Bool
+    let glyphPolicy: TerminalGlyphPlacementPolicy?
     /// True when the run carries underline or strikethrough attributes.
     let hasDecorations: Bool
+    /// Terminal cells the run's source text came from; spans its background
+    /// and decorations.
+    let sourceCells: Range<Int>
     let attributes: NSDictionary
 }
 
-/// Cache of CGColors derived from drawing colors. Deriving a CGColor is
-/// expensive (macOS 26 runs EDR-headroom evaluation on every conversion), and
-/// the draw loops convert the same few colors repeatedly. Main-thread only,
-/// like the CoreGraphics draw path that uses it; cleared in colorsChanged so
-/// palette or appearance updates repopulate it.
-private var cgColorCache: [TTColor: CGColor] = [:]
+/// Per-view caches for the main-thread Core Graphics renderer.
+///
+/// A process-global cache lets two terminal views mutate the same dictionaries
+/// at the same time. Keeping the cache with its view gives it the same lifetime
+/// and executor as the Core Graphics draw path.
+final class CoreGraphicsRenderCache {
+    fileprivate let runAttributeKeys = CoreTextRunAttributeKeys(
+        names: coreTextRunAttributeNames)
+    private var cgColors: [TTColor: CGColor] = [:]
+    private struct CTLineCacheKey: Hashable {
+        let text: NSAttributedString
+        let fallbackTag: UInt64
+    }
+    private var ctLines: [CTLineCacheKey: CTLine] = [:]
 
-@inline(__always)
-private func cachedCGColor(_ color: TTColor) -> CGColor {
-    if let cg = cgColorCache[color] {
+    @inline(__always)
+    func cgColor(for color: TTColor) -> CGColor {
+        if let cg = cgColors[color] {
+            return cg
+        }
+        if cgColors.count >= 1024 {
+            cgColors.removeAll(keepingCapacity: true)
+        }
+        let cg = color.cgColor
+        cgColors[color] = cg
         return cg
     }
-    if cgColorCache.count >= 1024 {
-        cgColorCache.removeAll(keepingCapacity: true)
+
+    func clearColors() {
+        cgColors.removeAll(keepingCapacity: true)
     }
-    let cg = color.cgColor
-    cgColorCache[color] = cg
-    return cg
-}
 
-func clearCGColorCache() {
-    cgColorCache.removeAll(keepingCapacity: true)
-}
-
-/// Fonts resolved for characters the base font cannot render (an Arabic cell
-/// under a Latin monospace font, say). Without this, every isolated cell's
-/// CTLine re-runs CoreText's font-fallback cascade on every frame, which
-/// costs orders of magnitude more than the actual glyph drawing.
-private struct FallbackFontKey: Hashable {
-    let baseFont: ObjectIdentifier
-    let character: Character
-}
-private var fallbackFontCache: [FallbackFontKey: TTFont] = [:]
-
-private func resolvedFont(for character: Character, base: TTFont) -> TTFont {
-    let key = FallbackFontKey(baseFont: ObjectIdentifier(base), character: character)
-    if let cached = fallbackFontCache[key] {
-        return cached
-    }
-    if fallbackFontCache.count >= 1024 {
-        fallbackFontCache.removeAll(keepingCapacity: true)
-    }
-    let text = String(character) as CFString
-    let resolved = CTFontCreateForString(base as CTFont, text,
-                                         CFRange(location: 0, length: CFStringGetLength(text)))
-    let font = resolved as TTFont
-    fallbackFontCache[key] = font
-    return font
-}
-
-/// CTLines keyed by their attributed string. Scrolling redraws recreate the
-/// same shaped rows dozens of times a second (one row higher each frame), so
-/// value-keyed reuse hits almost always; hashing a short attributed string is
-/// far cheaper than relayout. Keys are immutable copies, entries are evicted
-/// by the size bound, and stale entries are impossible because the key holds
-/// every input that shaped the line. Main-thread only, like the draw path.
-private var ctLineCache: [NSAttributedString: CTLine] = [:]
-
-/// Only short segments are cached: they are the isolated BiDi cells whose
-/// relayout (font-fallback cascade included) dwarfs the hash cost, and their
-/// small population keeps the hit rate high. Long segments change too often
-/// for value-keyed reuse to beat the extra hashing and key snapshot.
-private let ctLineCacheMaxLength = 8
-
-private func cachedCTLine(_ text: NSAttributedString) -> CTLine {
-    guard text.length <= ctLineCacheMaxLength else {
-        return CTLineCreateWithAttributedString(text)
-    }
-    if let line = ctLineCache[text] {
+    /// Only short segments are cached. They are isolated BiDi cells whose
+    /// layout cost is much greater than the key-copy cost. Host fallback runs
+    /// also include the font object identity because platform font equality
+    /// can treat two replacement fonts with the same name and size as equal.
+    func line(for text: NSAttributedString) -> CTLine {
+        let maxLength = 8
+        guard text.length <= maxLength else {
+            return CTLineCreateWithAttributedString(text)
+        }
+        var fallbackTag: UInt64 = 0
+        if text.length > 0,
+           text.attribute(SwiftTermGlyphPolicyKey, at: 0, effectiveRange: nil) != nil,
+           let font = text.attribute(.font, at: 0, effectiveRange: nil) as? TTFont {
+            fallbackTag = UInt64(bitPattern: Int64(ObjectIdentifier(font).hashValue))
+        }
+        let key = CTLineCacheKey(text: text, fallbackTag: fallbackTag)
+        if let line = ctLines[key] {
+            return line
+        }
+        if ctLines.count >= 2048 {
+            ctLines.removeAll(keepingCapacity: true)
+        }
+        let line = CTLineCreateWithAttributedString(text)
+        // The builder supplies NSMutableAttributedString. Store an immutable
+        // key so later builder changes cannot invalidate the dictionary.
+        ctLines[CTLineCacheKey(text: text.copy() as! NSAttributedString,
+                               fallbackTag: fallbackTag)] = line
         return line
     }
-    if ctLineCache.count >= 2048 {
-        ctLineCache.removeAll(keepingCapacity: true)
-    }
-    let line = CTLineCreateWithAttributedString(text)
-    // The builder hands us NSMutableAttributedString; snapshot the key.
-    ctLineCache[text.copy() as! NSAttributedString] = line
-    return line
 }
 
 // Holds the information used to render a line
@@ -217,6 +500,376 @@ struct ViewLineInfo {
     var blockElements: [BlockElementRenderItem]
     var boxDrawings: [BoxDrawingRenderItem]
     var powerlineGlyphs: [PowerlineRenderItem]
+}
+
+struct SnapshotSelectionResolver {
+    let style: SnapshotStyle
+    let cols: Int
+
+    func columns (forRow row: Int) -> Range<Int>? {
+        guard style.selectionActive else { return nil }
+        return SelectionService.selectedColumns(
+            row: row, cols: cols, start: style.selectionStart, end: style.selectionEnd,
+            block: style.selectionIsBlock, exclusiveEnd: false)
+    }
+}
+
+/// The view state one frame reads, captured as a value on the main thread.
+///
+/// Preparing a frame — refreshing the snapshot under the terminal lock and
+/// building the render context — has to be callable from a render thread
+/// (io-gaps.md G1). Reaching into the view from there is a data race: fonts,
+/// colors, selection and bounds all change on main. So main captures them once
+/// per frame into this struct, and the preparation reads only the struct.
+///
+/// Adding a field here is fine. Reading live view state from the preparation
+/// path instead is not: that is the invariant this type exists to hold.
+struct FrameViewState: Sendable {
+    let cursorRenderingPolicy: CursorRenderingPolicy
+    // What TerminalSnapshot.refresh reads.
+    let linkHighlightRange: [Terminal.LinkMatch.RowRange]?
+    let linkHighlightMode: LinkHighlightMode
+    let commandActive: Bool
+    let textBlinkVisible: Bool
+    let notifyUpdateChanges: Bool
+
+    // What SnapshotRenderContext reads, plus the geometry the frame tick uses
+    // to compute its dirty region.
+    let fonts: FrameFontSet
+    let cellDimension: TerminalView.CellDimension
+    let viewBounds: CGRect
+    let viewFrameHeight: CGFloat
+    let renderingScale: CGFloat
+    let cellPixelWidth: Int
+    let cellPixelHeight: Int
+    let imageScale: CGFloat
+    let metalBufferingMode: MetalBufferingMode
+    let fontSmoothing: Bool
+    let antiAliasCustomBlockGlyphs: Bool
+    let cursorHasFocus: Bool
+    let appearance: FrameAppearance
+    let customBlockGlyphs: Bool
+    let useBrightColors: Bool
+    let collapseBrightColorsToBase: Bool
+    let minimumContrastRatio: CGFloat
+    /// The fork's L* lightness floor (`TerminalView.minimumContrast`), 0 = off.
+    let minimumLightnessContrast: CGFloat
+    /// The host's bold default-foreground color, nil when unset or while
+    /// DEC reverse-screen swaps the default colors.
+    let boldForegroundColor: FrameColor?
+    let translucentCellBackgrounds: Bool
+    let bidiHostPolicy: BidiHostPolicy
+    let glyphFallbackProvider: (any TerminalGlyphFallbackProvider)?
+
+    var effectiveForegroundColor: FrameColor { appearance.effectiveForegroundColor }
+    var effectiveBackgroundColor: FrameColor { appearance.effectiveBackgroundColor }
+    var selectedTextBackgroundColor: FrameColor { appearance.selectedTextBackgroundColor }
+    var selectedTextForegroundColor: FrameColor { appearance.selectedTextForegroundColor }
+    var caretColor: FrameColor { appearance.caretColor }
+    var caretTextColor: FrameColor { appearance.caretTextColor }
+    var linkColor: FrameColor? { appearance.linkColor }
+    var linkUnderlineColor: FrameColor? { appearance.linkUnderlineColor }
+
+    @MainActor
+    init (view: TerminalView) {
+        cursorRenderingPolicy = view.renderOwner.cursorRenderingPolicy.withLock { $0 }
+        linkHighlightRange = view.linkHighlightRange
+        linkHighlightMode = view.linkHighlightMode
+        commandActive = view.commandActive
+        textBlinkVisible = view.textBlinkVisible
+        notifyUpdateChanges = view.notifyUpdateChanges
+
+        fonts = view.frameCaptureCache.fonts(for: view)
+        cellDimension = view.cellDimension
+        viewBounds = view.bounds
+        viewFrameHeight = view.frame.height
+#if os(macOS)
+        renderingScale = view.metalRenderingScaleFactor()
+        fontSmoothing = view.fontSmoothing
+        cursorHasFocus = !view.caretViewTracksFocus || view.hasFocus
+#else
+        renderingScale = view.backingScaleFactor()
+        fontSmoothing = true
+        cursorHasFocus = !view.caretViewTracksFocus || view.isFirstResponder
+#endif
+        let backingScale = view.backingScaleFactor()
+        cellPixelWidth = cellPixelDimension(cellDimension.width, scale: backingScale)
+        cellPixelHeight = cellPixelDimension(cellDimension.height, scale: backingScale)
+        imageScale = view.getImageScale()
+        metalBufferingMode = view.metalBufferingMode
+        antiAliasCustomBlockGlyphs = view.antiAliasCustomBlockGlyphs
+        appearance = view.frameCaptureCache.appearance(for: view)
+        customBlockGlyphs = view.customBlockGlyphs
+        useBrightColors = view.useBrightColors
+        collapseBrightColorsToBase = view.collapseBrightColorsToBase
+        minimumContrastRatio = view.minimumContrastRatio
+        minimumLightnessContrast = view.minimumContrast
+        boldForegroundColor = view.reverseColorsActiveValue()
+            ? nil : view.nativeBoldForegroundColor.map { FrameColor($0, view: view) }
+#if os(macOS)
+        translucentCellBackgrounds = view.translucentCellBackgrounds
+#else
+        translucentCellBackgrounds = false
+#endif
+        bidiHostPolicy = view.bidiHostPolicy
+        glyphFallbackProvider = view.glyphFallbackProvider
+    }
+}
+
+struct FrameChangedRange: Sendable, Equatable {
+    let start: Int
+    let end: Int
+}
+
+struct FrameTerminalSize: Sendable, Equatable {
+    let cols: Int
+    let rows: Int
+}
+
+/// The complete render-to-main message for one frame.
+///
+/// It contains only checked-Sendable values. Cursor render data stays with
+/// `PreparedFrame` in the render owner.
+struct MainFrameEffects: Sendable {
+    var rangeChanged: FrameChangedRange?
+    var notifyAccessibility: Bool
+    var scrollPosition: Double
+    var blinkRows: [Int] = []
+    var resizedTo: FrameTerminalSize? = nil
+#if os(macOS)
+    var scroller: TerminalView.ScrollerState? = nil
+    /// The selection the frame shows, so VoiceOver hears of a change to it
+    /// rather than of every frame.
+    var selection: SnapshotSelectionState = .empty
+#endif
+}
+
+/// Platform colors materialized inside the render owner.
+struct SnapshotNativeColors {
+    let effectiveForegroundColor: TTColor
+    let effectiveBackgroundColor: TTColor
+    let selectedTextBackgroundColor: TTColor
+    let selectedTextForegroundColor: TTColor
+    let caretColor: TTColor
+    let caretTextColor: TTColor
+    let linkColor: TTColor?
+    let linkUnderlineColor: TTColor?
+    let ansiColors: [TTColor]
+}
+
+struct SnapshotRenderContext {
+    let fonts: FrameFontSet
+    let cellDimension: TerminalView.CellDimension
+    let viewBounds: CGRect
+    let renderingScale: CGFloat
+    let imageScale: CGFloat
+    let metalBufferingMode: MetalBufferingMode
+    let fontSmoothing: Bool
+    let antiAliasCustomBlockGlyphs: Bool
+    let cursorHasFocus: Bool
+    let effectiveForegroundColor: TTColor
+    let effectiveBackgroundColor: TTColor
+    let selectedTextBackgroundColor: TTColor
+    let selectedTextForegroundColor: TTColor
+    let caretColor: TTColor
+    let caretTextColor: TTColor
+    /// Replaces the foreground and underline color of highlighted link cells;
+    /// `nil` keeps the cell's own colors.
+    let linkColor: TTColor?
+    let linkUnderlineColor: TTColor?
+    let ansiColors: [TTColor]
+    let selection: SnapshotSelectionResolver
+    let textBlinkVisible: Bool
+    let linkHighlightRange: [Terminal.LinkMatch.RowRange]?
+    let linkHighlightMode: LinkHighlightMode
+    let commandActive: Bool
+    let customBlockGlyphs: Bool
+    let enableOsc8Hyperlinks: Bool
+    let useBrightColors: Bool
+    let collapseBrightColorsToBase: Bool
+    let minimumContrastRatio: CGFloat
+    /// See ``FrameViewState/minimumLightnessContrast``.
+    let minimumLightnessContrast: CGFloat
+    /// See ``FrameViewState/boldForegroundColor``.
+    let boldForegroundColor: TTColor?
+    /// The alpha explicit cell backgrounds are drawn with, or nil when they
+    /// stay opaque. Set when `translucentCellBackgrounds` is on and the
+    /// default background is translucent; it is the default background's own
+    /// alpha, so colored rows read as part of the same surface.
+    ///
+    /// While it is set, both renderers paint background fills by *replacing*
+    /// the default background beneath them instead of compositing over it,
+    /// so an explicit cell ends at exactly this alpha (a source-over fill at
+    /// 0.4 over a 0.4 underlay would end at 0.64).
+    let translucentCellBackgroundAlpha: CGFloat?
+    /// The selection highlight as it is painted. While
+    /// `translucentCellBackgroundAlpha` is set, background fills replace the
+    /// default background, so the selection color arrives already composited
+    /// over it; the pixels match the highlight drawn over the default background.
+    let selectionFillColor: TTColor
+    let bidiHostPolicy: BidiHostPolicy
+    let glyphFallbackProvider: (any TerminalGlyphFallbackProvider)?
+    let cols: Int
+
+    /// Identifies the values used to build attributed-string dictionaries.
+    /// Equal visual inputs produce the same identity across frames, so the
+    /// renderer cache stays warm until a font, palette, or default color
+    /// changes.
+    let identity: UInt64
+
+    init (viewState: FrameViewState, snapshot: TerminalSnapshot) {
+        self.init(viewState: viewState, style: snapshot.style,
+                  nativeColors: snapshot.nativeColors(for: viewState.appearance),
+                  cols: snapshot.cols)
+    }
+
+    init (viewState: FrameViewState, style: SnapshotStyle, ansiColors: [Color],
+          cols: Int) {
+        let appearance = viewState.appearance
+        self.init(
+            viewState: viewState,
+            style: style,
+            nativeColors: SnapshotNativeColors(
+                effectiveForegroundColor: appearance.effectiveForegroundColor.nativeColor,
+                effectiveBackgroundColor: appearance.effectiveBackgroundColor.nativeColor,
+                selectedTextBackgroundColor: appearance.selectedTextBackgroundColor.nativeColor,
+                selectedTextForegroundColor: appearance.selectedTextForegroundColor.nativeColor,
+                caretColor: appearance.caretColor.nativeColor,
+                caretTextColor: appearance.caretTextColor.nativeColor,
+                linkColor: appearance.linkColor?.nativeColor,
+                linkUnderlineColor: appearance.linkUnderlineColor?.nativeColor,
+                ansiColors: ansiColors.map(TTColor.make(color:))),
+            cols: cols)
+    }
+
+    private init (viewState: FrameViewState, style: SnapshotStyle,
+                  nativeColors: SnapshotNativeColors, cols: Int) {
+        fonts = viewState.fonts
+        cellDimension = viewState.cellDimension
+        viewBounds = viewState.viewBounds
+        renderingScale = viewState.renderingScale
+        fontSmoothing = viewState.fontSmoothing
+        cursorHasFocus = viewState.cursorHasFocus
+        imageScale = viewState.imageScale
+        metalBufferingMode = viewState.metalBufferingMode
+        antiAliasCustomBlockGlyphs = viewState.antiAliasCustomBlockGlyphs
+        effectiveForegroundColor = nativeColors.effectiveForegroundColor
+        effectiveBackgroundColor = nativeColors.effectiveBackgroundColor
+        selectedTextBackgroundColor = nativeColors.selectedTextBackgroundColor
+        selectedTextForegroundColor = nativeColors.selectedTextForegroundColor
+        caretColor = nativeColors.caretColor
+        caretTextColor = nativeColors.caretTextColor
+        linkColor = nativeColors.linkColor
+        linkUnderlineColor = nativeColors.linkUnderlineColor
+        ansiColors = nativeColors.ansiColors
+        selection = SnapshotSelectionResolver(style: style, cols: cols)
+        textBlinkVisible = style.textBlinkVisible
+        linkHighlightRange = style.linkHighlightRange
+        linkHighlightMode = style.linkHighlightMode
+        commandActive = style.commandActive
+        enableOsc8Hyperlinks = style.enableOsc8Hyperlinks
+        customBlockGlyphs = viewState.customBlockGlyphs
+        useBrightColors = viewState.useBrightColors
+        collapseBrightColorsToBase = viewState.collapseBrightColorsToBase
+        minimumContrastRatio = viewState.minimumContrastRatio
+        minimumLightnessContrast = viewState.minimumLightnessContrast
+        boldForegroundColor = viewState.boldForegroundColor?.nativeColor
+        let defaultBackgroundAlpha = effectiveBackgroundColor.cgColor.alpha
+        if viewState.translucentCellBackgrounds && defaultBackgroundAlpha < 1 {
+            translucentCellBackgroundAlpha = defaultBackgroundAlpha
+            selectionFillColor = compositedColor(selectedTextBackgroundColor,
+                                                 over: effectiveBackgroundColor)
+        } else {
+            translucentCellBackgroundAlpha = nil
+            selectionFillColor = selectedTextBackgroundColor
+        }
+        bidiHostPolicy = viewState.bidiHostPolicy
+        glyphFallbackProvider = viewState.glyphFallbackProvider
+        self.cols = cols
+
+        var identityHasher = Hasher()
+        identityHasher.combine(fonts.normal.hash)
+        identityHasher.combine(fonts.bold.hash)
+        identityHasher.combine(fonts.italic.hash)
+        identityHasher.combine(fonts.boldItalic.hash)
+        identityHasher.combine(glyphFallbackProvider?.cacheIdentity ?? 0)
+        identityHasher.combine(effectiveForegroundColor.hash)
+        identityHasher.combine(effectiveBackgroundColor.hash)
+        identityHasher.combine(selectedTextBackgroundColor.hash)
+        identityHasher.combine(selectedTextForegroundColor.hash)
+        identityHasher.combine(caretColor.hash)
+        identityHasher.combine(caretTextColor.hash)
+        identityHasher.combine(linkColor?.hash)
+        identityHasher.combine(linkUnderlineColor?.hash)
+        for color in self.ansiColors {
+            identityHasher.combine(color.hash)
+        }
+        identityHasher.combine(useBrightColors)
+        identityHasher.combine(collapseBrightColorsToBase)
+        identityHasher.combine(minimumContrastRatio)
+        identityHasher.combine(minimumLightnessContrast)
+        identityHasher.combine(boldForegroundColor?.hash)
+        identityHasher.combine(translucentCellBackgroundAlpha)
+        identity = UInt64(bitPattern: Int64(identityHasher.finalize()))
+    }
+
+    /// ``CellGeometry/baselineOffset(normalFont:cellHeight:)`` for the fonts and
+    /// cell geometry captured in this frame. Both renderers read it from here so
+    /// a frame's text, caret, and scaled glyphs share one baseline.
+    var baselineOffset: CGFloat {
+        CellGeometry.baselineOffset(normalFont: fonts.normal,
+                                    cellHeight: cellDimension.height)
+    }
+
+    func glyphSlotFit (font: CTFont, glyph: CGGlyph, columnWidth: Int) -> GlyphSlotFit {
+        GlyphSlotFit.calculate(font: font, glyph: glyph, columnWidth: columnWidth,
+                               cellDimension: cellDimension, normalFont: fonts.normal)
+    }
+}
+
+/// Text geometry derived from a cell's size. Not isolated to the main actor:
+/// the snapshot renderers do this arithmetic on their own threads, from the
+/// fonts and cell dimensions captured for the frame.
+enum CellGeometry {
+    /// Snap after the full drawing transform: a caret's local origin and a
+    /// double-height row can both carry a fractional device-pixel translation.
+    static func pixelAlignedGlyphOrigin(_ point: CGPoint, in context: CGContext) -> CGPoint {
+        let device = context.convertToDeviceSpace(point)
+        return context.convertToUserSpace(CGPoint(x: device.x.rounded(), y: device.y.rounded()))
+    }
+
+    /// Distance from the bottom of a cell to the glyph baseline.
+    ///
+    /// ``TerminalView/lineSpacing`` makes the cell taller than the font's
+    /// natural line (ascent + descent + leading) in `computeFontDimensions`,
+    /// but the baseline used to stay pinned at `descent + leading` from the
+    /// cell's bottom, so every bit of the added height piled up above the text
+    /// and rows looked bottom-heavy at the larger values (1.4-1.6). This
+    /// splits the extra evenly above and below the glyph instead — the
+    /// half-leading model iTerm2 and WezTerm use — so text stays vertically
+    /// centered in its cell.
+    ///
+    /// The classic `ceil(descent + leading)` term is kept intact and the
+    /// glyph's share of the extra is added as a whole number of points on top,
+    /// rather than rounding the sum: that keeps the baseline on the same pixel
+    /// grid the old offset landed on, and it makes the default exact rather
+    /// than approximate. A cell within two points of the font's natural height
+    /// — which pixel-grid snapping alone can produce at `lineSpacing == 1` on
+    /// a fractional backing scale — yields the classic offset unchanged, so
+    /// nobody who leaves `lineSpacing` alone sees a single pixel move.
+    ///
+    /// Every renderer — CoreGraphics, Metal, the caret views — and the glyph
+    /// slot fitter must derive baselines from this one function. The local
+    /// copies of the formula it replaces are how those paths drifted out of
+    /// sync in the first place.
+    static func baselineOffset (normalFont: CTFont, cellHeight: CGFloat) -> CGFloat
+    {
+        let descent = CTFontGetDescent (normalFont)
+        let leading = CTFontGetLeading (normalFont)
+        let naturalHeight = ceil (CTFontGetAscent (normalFont) + descent + leading)
+        let extra = max (0, cellHeight - naturalHeight)
+        return ceil (descent + leading) + floor (extra / 2)
+    }
 }
 
 /// How to place a single glyph within its `columnWidth`-cell slot.
@@ -237,61 +890,709 @@ struct ViewLineInfo {
 struct GlyphSlotFit {
     var dx: CGFloat = 0
     var dy: CGFloat = 0
-    var scale: CGFloat = 1
+    var scaleX: CGFloat = 1
+    var scaleY: CGFloat = 1
+
+    /// Uniform scale for the paths that redraw by font size. Every non-policy
+    /// fit is uniform; only a `.stretch` placement produces distinct per-axis
+    /// scales, and its draw paths read `scaleX`/`scaleY` directly.
+    var scale: CGFloat { scaleX }
+    var isUniform: Bool { scaleX == scaleY }
+
+    init (dx: CGFloat = 0, dy: CGFloat = 0, scale: CGFloat = 1) {
+        self.dx = dx
+        self.dy = dy
+        scaleX = scale
+        scaleY = scale
+    }
+
+    init (dx: CGFloat, dy: CGFloat, scaleX: CGFloat, scaleY: CGFloat) {
+        self.dx = dx
+        self.dy = dy
+        self.scaleX = scaleX
+        self.scaleY = scaleY
+    }
 
     static let identity = GlyphSlotFit()
 
-    var isIdentity: Bool { dx == 0 && dy == 0 && scale == 1 }
+    var isIdentity: Bool { dx == 0 && dy == 0 && scaleX == 1 && scaleY == 1 }
+
+    static func calculate (font: CTFont, glyph: CGGlyph, columnWidth: Int,
+                           cellDimension: CGSize, normalFont: TTFont) -> GlyphSlotFit {
+        guard columnWidth >= 2 else { return .identity }
+
+        let metrics = GlyphMetrics.measure(font: font, glyph: glyph)
+        let baselineFromBottom = CellGeometry.baselineOffset(normalFont: normalFont,
+                                                             cellHeight: cellDimension.height)
+        return calculate(metrics: metrics,
+                         columnWidth: columnWidth,
+                         cellDimension: cellDimension,
+                         baselineFromBottom: baselineFromBottom,
+                         renderingScale: 1)
+    }
+
+    /// Calculates the fit from metrics measured on a font scaled for rendering.
+    /// Metric and geometry arithmetic is in pixels. The returned offsets remain
+    /// in points because the existing vertex path applies the rendering scale.
+    static func calculate(metrics: GlyphMetrics,
+                          columnWidth: Int,
+                          cellDimension: CGSize,
+                          baselineFromBottom: CGFloat,
+                          renderingScale: CGFloat) -> GlyphSlotFit {
+        guard columnWidth >= 2, renderingScale > 0 else { return .identity }
+
+        let slotWidth = CGFloat(columnWidth) * cellDimension.width * renderingScale
+        let cellHeight = cellDimension.height * renderingScale
+        let advance = metrics.horizontalAdvance
+        guard advance > 0 else { return .identity }
+        let ink = metrics.fitInkBounds
+
+        var scale: CGFloat = 1
+        if ink.width > slotWidth || ink.height > cellHeight,
+           ink.width > 0, ink.height > 0 {
+            scale = max(0.1, min(min(slotWidth / ink.width,
+                                     cellHeight / ink.height), 1))
+        }
+
+        let dxPixels = (slotWidth - advance * scale) / 2
+        var dyPixels: CGFloat = 0
+        if scale < 1, ink.height > 0 {
+            let inkCenterFromBaseline = (ink.origin.y + ink.height / 2) * scale
+            dyPixels = (cellHeight / 2 - baselineFromBottom * renderingScale) -
+                inkCenterFromBaseline
+        }
+        return GlyphSlotFit(dx: dxPixels / renderingScale,
+                            dy: dyPixels / renderingScale,
+                            scale: scale)
+    }
+
+    /// Shrinks a glyph that CoreText substituted from a fallback font when its
+    /// advance is wider than the single cell it occupies. U+FB03 `ﬃ` from
+    /// Lucida Grande is about 1.6 cells wide under Menlo and would otherwise
+    /// paint over the next cell. The scale is anchored at the pen origin, so
+    /// the glyph keeps its baseline and cell edge. Glyphs that fit are left
+    /// untouched.
+    static func fitFallbackToCell (metrics: GlyphMetrics, cellWidth: CGFloat,
+                                   renderingScale: CGFloat) -> GlyphSlotFit {
+        let slotWidth = cellWidth * renderingScale
+        guard slotWidth > 0, metrics.horizontalAdvance > slotWidth else { return .identity }
+        return GlyphSlotFit(scale: slotWidth / metrics.horizontalAdvance)
+    }
+
+    /// Internal tuning knob for the one-column icon-height limit; 1.0 leaves
+    /// the primary font's ascent as the limit. Not public: the spec adds a
+    /// host-visible setting only when the host already has one.
+    static let adjustIconHeight: CGFloat = 1.0
+
+    /// Applies a host ``TerminalGlyphPlacementPolicy`` to a fallback glyph.
+    ///
+    /// Unlike the guard-rail overload above this also constrains one-column
+    /// glyphs, applies the policy's width limit and padding, honors the
+    /// cover/stretch modes, and centers the ink box even when no downscale is
+    /// needed. `iconHeight` is the primary font's icon-height limit in pixels
+    /// (its ascent at the rendering scale); the grid stays based on the
+    /// selected font, never on the fallback face's metrics. Icon placements
+    /// never enlarge a glyph past its natural size; `.cover` and `.stretch`
+    /// scale in either direction so the glyph fills its slot as specified.
+    static func calculate (metrics: GlyphMetrics,
+                           policy: TerminalGlyphPlacementPolicy,
+                           columnWidth: Int,
+                           cellDimension: CGSize,
+                           baselineFromBottom: CGFloat,
+                           iconHeight: CGFloat,
+                           renderingScale: CGFloat) -> GlyphSlotFit {
+        guard renderingScale > 0 else { return .identity }
+
+        let cellWidth = cellDimension.width * renderingScale
+        let cellHeight = cellDimension.height * renderingScale
+        let slotColumns = max(1, min(columnWidth, policy.maximumCellWidth ?? columnWidth))
+        let padLeft = policy.padding.left * cellWidth
+        let padRight = policy.padding.right * cellWidth
+        let padTop = policy.padding.top * cellHeight
+        let padBottom = policy.padding.bottom * cellHeight
+        let allowedWidth = max(1, CGFloat(slotColumns) * cellWidth - padLeft - padRight)
+        let allowedHeight = max(1, cellHeight - padTop - padBottom)
+
+        let ink = metrics.fitInkBounds
+        guard ink.width > 0, ink.height > 0 else { return .identity }
+
+        // Grouped icons fit their group's virtual box so that every member of
+        // the group lands on the same vertical frame; the glyph's own ink is a
+        // `relativeBounds` fraction of that box.
+        var fitBox = ink
+        if policy.placement == .grouped, let relative = policy.relativeBounds,
+           relative.width > 0, relative.height > 0 {
+            let groupWidth = ink.width / relative.width
+            let groupHeight = ink.height / relative.height
+            fitBox = CGRect(x: ink.origin.x - relative.minX * groupWidth,
+                            y: ink.origin.y - relative.minY * groupHeight,
+                            width: groupWidth,
+                            height: groupHeight)
+        }
+
+        let scaleX: CGFloat
+        let scaleY: CGFloat
+        switch policy.placement {
+        case .stretch:
+            // Fill the padded slot exactly, scaling each axis independently
+            // and in either direction. The icon-height limit does not apply.
+            scaleX = allowedWidth / fitBox.width
+            scaleY = allowedHeight / fitBox.height
+        case .cover:
+            // Fill the intended cell width, enlarging if needed, bounded only
+            // by the cell height — the icon-height limit does not apply.
+            let scale = max(0.1, min(allowedWidth / fitBox.width,
+                                     allowedHeight / fitBox.height))
+            scaleX = scale
+            scaleY = scale
+        case .icon, .explicitWidth, .grouped:
+            let heightLimit = slotColumns == 1 && iconHeight > 0
+                ? min(allowedHeight, iconHeight * adjustIconHeight)
+                : allowedHeight
+            // Contain fit: may shrink, never enlarges past natural size.
+            let scale = max(0.1, min(min(allowedWidth / fitBox.width,
+                                         heightLimit / fitBox.height), 1))
+            scaleX = scale
+            scaleY = scale
+        }
+
+        // Center the (scaled) box horizontally inside the padded slot and
+        // vertically between the padding insets. dx/dy displace the glyph
+        // origin, whose pen position sits on the baseline at the slot's left
+        // edge, so the ink origin participates in both.
+        let dxPixels = padLeft + (allowedWidth - fitBox.width * scaleX) / 2
+            - fitBox.origin.x * scaleX
+        let boxCenterFromBaseline = (fitBox.origin.y + fitBox.height / 2) * scaleY
+        let targetCenterFromBottom = padBottom + allowedHeight / 2
+        let dyPixels = (targetCenterFromBottom - baselineFromBottom * renderingScale)
+            - boxCenterFromBaseline
+
+        return GlyphSlotFit(dx: dxPixels / renderingScale,
+                            dy: dyPixels / renderingScale,
+                            scaleX: scaleX,
+                            scaleY: scaleY)
+    }
 }
 
-struct LineInfoCacheEntry {
-    var lineRef: BufferLine
-    var generation: UInt64
-    var cols: Int
-    var cacheGeneration: UInt64
-    var info: ViewLineInfo
+/// Unrounded Core Text metrics in the coordinate space of `font`.
+///
+/// The Metal renderer measures a font whose point size already includes the
+/// rendering scale. These values are therefore pixel-space metrics there.
+struct GlyphMetrics {
+    let inkBounds: CGRect
+    let horizontalAdvance: CGFloat
+    let fontSize: CGFloat
+    let fitInkSizeScale: CGFloat
+
+    /// Interprets fixed color-bitmap strikes in the requested pixel space.
+    /// Core Text can select a strike whose size differs from the requested
+    /// point size. Its center remains in the requested coordinate space, but
+    /// its width and height are in strike space.
+    var fitInkBounds: CGRect {
+        guard fitInkSizeScale != 1 else { return inkBounds }
+        let size = CGSize(width: inkBounds.width * fitInkSizeScale,
+                          height: inkBounds.height * fitInkSizeScale)
+        return CGRect(x: inkBounds.origin.x,
+                      y: inkBounds.midY - size.height / 2,
+                      width: size.width,
+                      height: size.height)
+    }
+
+    static func measure(font: CTFont, glyph: CGGlyph,
+                        fittingFont: CTFont? = nil,
+                        renderingScale: CGFloat = 1) -> GlyphMetrics {
+        var glyph = glyph
+        var advance = CGSize.zero
+        let fittingFont = fittingFont ?? font
+        CTFontGetAdvancesForGlyphs(fittingFont, .horizontal, &glyph, &advance, 1)
+        var inkBounds = CGRect.zero
+        CTFontGetBoundingRectsForGlyphs(font, .horizontal, &glyph, &inkBounds, 1)
+
+        var fitInkSizeScale: CGFloat = 1
+        if renderingScale != 1,
+           CTFontGetSymbolicTraits(font).contains(.traitColorGlyphs) {
+            let sourceAscent = CTFontGetAscent(fittingFont)
+            let strikeAscent = CTFontGetAscent(font)
+            if sourceAscent > 0, strikeAscent > 0 {
+                let strikeScale = strikeAscent / sourceAscent
+                fitInkSizeScale = renderingScale / strikeScale
+            }
+        }
+        return GlyphMetrics(inkBounds: inkBounds,
+                            horizontalAdvance: advance.width * renderingScale,
+                            fontSize: CTFontGetSize(font),
+                            fitInkSizeScale: fitInkSizeScale)
+    }
+}
+
+private let terminalFramePresentedHandler = LockedVoidCallback()
+
+/// A copied row from the visible terminal region.
+public struct TerminalVisibleRowSnapshot: Sendable, Equatable {
+    public let row: Int
+    public let text: String
+    public let isWrapped: Bool
+    public let bidiState: BidiPresentationState
+    /// The display width of each copied cell. Wide cells use `2` for the
+    /// leading cell and `0` for the trailing cell.
+    public let cellWidths: [Int]
+
+    public init(row: Int, text: String, isWrapped: Bool,
+                bidiState: BidiPresentationState, cellWidths: [Int]) {
+        self.row = row
+        self.text = text
+        self.isWrapped = isWrapped
+        self.bidiState = bidiState
+        self.cellWidths = cellWidths
+    }
+}
+
+/// A copied terminal state for status displays and diagnostics.
+public struct TerminalViewStateSnapshot: Sendable {
+    public let dimensions: TerminalDimensions
+    public let cursor: Position
+    public let viewportRow: Int
+    /// Whether DEC private mode 2004 (bracketed paste) is enabled.
+    public let bracketedPasteMode: Bool
+    public let currentBidiState: BidiPresentationState
+    public let bidiArrowKeySwap: Bool
+    public let cursorStyle: CursorStyle
+    public let ansi256PaletteStrategy: Ansi256PaletteStrategy
+    public let visibleRows: [TerminalVisibleRowSnapshot]
+
+    public init(
+        dimensions: TerminalDimensions,
+        cursor: Position,
+        viewportRow: Int,
+        bracketedPasteMode: Bool,
+        currentBidiState: BidiPresentationState,
+        bidiArrowKeySwap: Bool,
+        cursorStyle: CursorStyle,
+        ansi256PaletteStrategy: Ansi256PaletteStrategy,
+        visibleRows: [TerminalVisibleRowSnapshot]
+    ) {
+        self.dimensions = dimensions
+        self.cursor = cursor
+        self.viewportRow = viewportRow
+        self.bracketedPasteMode = bracketedPasteMode
+        self.currentBidiState = currentBidiState
+        self.bidiArrowKeySwap = bidiArrowKeySwap
+        self.cursorStyle = cursorStyle
+        self.ansi256PaletteStrategy = ansi256PaletteStrategy
+        self.visibleRows = visibleRows
+    }
+}
+
+/// Delivers input to one main-actor sink in FIFO order.
+///
+/// At most one drain task is pending. The queue preserves the order in which
+/// callers enter ``enqueue(_:)`` without relying on unstructured task order.
+private final class TerminalInputMainActorDelivery: Sendable {
+    private struct State: Sendable {
+        var pending: [[UInt8]] = []
+        var drainScheduled = false
+    }
+
+    private let state = Locked(State())
+    private let sink: @MainActor @Sendable ([UInt8]) -> Void
+
+    init(sink: @escaping @MainActor @Sendable ([UInt8]) -> Void) {
+        self.sink = sink
+    }
+
+    func enqueue(_ bytes: [UInt8], deferDelivery: Bool = false) {
+        let shouldSchedule = state.withLock { state in
+            state.pending.append(bytes)
+            guard !state.drainScheduled else { return false }
+            state.drainScheduled = true
+            return true
+        }
+
+        guard shouldSchedule else { return }
+        if Thread.isMainThread && !deferDelivery {
+            MainActor.assumeIsolated { drain() }
+        } else {
+            Task { @MainActor in drain() }
+        }
+    }
+
+    @MainActor
+    private func drain() {
+        while true {
+            let batch = state.withLock { state -> [[UInt8]]? in
+                guard !state.pending.isEmpty else {
+                    state.drainScheduled = false
+                    return nil
+                }
+                let batch = state.pending
+                state.pending.removeAll(keepingCapacity: true)
+                return batch
+            }
+            guard let batch else { return }
+            for bytes in batch {
+                sink(bytes)
+            }
+        }
+    }
+}
+
+/// A checked handle for sending user input from any thread.
+///
+/// The handle retains no view. It registers semantic input under the render
+/// owner's terminal lock, schedules UI effects on the main actor, and invokes
+/// the current checked transport sink.
+public final class TerminalInputSender: Sendable {
+    private struct State: Sendable {
+        var registerInput: (@Sendable ([UInt8]) -> Void)?
+        var notifyUI: (@MainActor @Sendable () -> Void)?
+        var deliver: (@Sendable ([UInt8]) -> Void)?
+        var deliverOnMain: (@MainActor @Sendable ([UInt8]) -> Void)?
+        var deliverRegistered: (@Sendable ([UInt8]) -> Void)?
+    }
+
+    private let state = Locked(State())
+
+    @MainActor
+    fileprivate func configure(
+        registerInput: @escaping @Sendable ([UInt8]) -> Void,
+        notifyUI: @escaping @MainActor @Sendable () -> Void,
+        deliver: @escaping @Sendable ([UInt8]) -> Void,
+        deliverOnMain: @escaping @MainActor @Sendable ([UInt8]) -> Void,
+        deliverRegistered: @escaping @Sendable ([UInt8]) -> Void
+    ) {
+        state.withLock { state in
+            state.registerInput = registerInput
+            state.notifyUI = notifyUI
+            state.deliver = deliver
+            state.deliverOnMain = deliverOnMain
+            state.deliverRegistered = deliverRegistered
+        }
+    }
+
+    @MainActor
+    func replaceDelivery(
+        _ deliver: @escaping @Sendable ([UInt8]) -> Void
+    ) {
+        state.withLock { state in
+            state.deliver = deliver
+            state.deliverOnMain = { bytes in deliver(bytes) }
+            // The checked process transport has no view callbacks or terminal
+            // registration. Both paths can submit directly in the same order.
+            state.deliverRegistered = deliver
+        }
+    }
+
+    /// Sends one input payload. Serial calls preserve their delivery order.
+    /// Calls from concurrent threads need external ordering when byte order
+    /// between those threads matters.
+    public func send(data: ArraySlice<UInt8>) {
+        let bytes = Array(data)
+        let handlers = state.withLock {
+            (register: $0.registerInput, notify: $0.notifyUI,
+             deliver: $0.deliver, deliverOnMain: $0.deliverOnMain)
+        }
+        handlers.register?(bytes)
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                handlers.notify?()
+                handlers.deliverOnMain?(bytes)
+            }
+            return
+        }
+        if let notify = handlers.notify {
+            Task { @MainActor in notify() }
+        }
+        handlers.deliver?(bytes)
+    }
+
+    /// Core input already owns the semantic-registration lock. Skip register
+    /// and UI callbacks, but join the same delivery FIFO as following keys.
+    fileprivate func sendRegistered(data: ArraySlice<UInt8>) {
+        let deliver = state.withLock { $0.deliverRegistered }
+        deliver?(Array(data))
+    }
+}
+
+/// A checked handle for feeding parser input from any thread.
+public final class TerminalFeedSender: Sendable {
+    private struct State: Sendable {
+        var feedBytes: (@Sendable ([UInt8]) -> Void)?
+        var feedText: (@Sendable (String) -> Void)?
+    }
+
+    private let state = Locked(State())
+
+    @MainActor
+    fileprivate func configure(
+        feedBytes: @escaping @Sendable ([UInt8]) -> Void,
+        feedText: @escaping @Sendable (String) -> Void
+    ) {
+        state.withLock { state in
+            state.feedBytes = feedBytes
+            state.feedText = feedText
+        }
+    }
+
+    public func feed(byteArray: ArraySlice<UInt8>) {
+        let bytes = Array(byteArray)
+        state.withLock { $0.feedBytes }?(bytes)
+    }
+
+    public func feed(text: String) {
+        state.withLock { $0.feedText }?(text)
+    }
+}
+
+/// Identifies one cropped Kitty placement bitmap in `kittyPlacementImageCache`.
+///
+/// The crop depends on the placement, on the pixels of the frame on display and
+/// on the part of the image the placement currently shows, so all three take
+/// part in the key: a cache hit is only valid while none of them has changed.
+struct KittyPlacementImageKey: Hashable {
+    let token: UInt64
+    let contentGeneration: UInt64
+    let source: KittyGraphicsPixelRect
+}
+
+struct TerminalViewCrossThreadState: Sendable {
+    var reverseColorsActive = false
+    var cachedCellPointSize: CGSize?
+    var cachedImageScale: CGFloat?
+    var cachedCellPixelSize: (width: Int, height: Int)?
+    var cachedNativeColors: (foreground: Color, background: Color)?
+    var scrolledDirty = false
+}
+
+final class AppleKittyClipboardBridge: Sendable {
+    let capabilities = Locked(KittyClipboardCapabilities())
 }
 
 extension TerminalView {
 
-    /// Pixel-derived geometry may mutate the logical grid only when the
-    /// consumer has opted into the historical auto-resize behavior.
-    private var boundsMayMutateGrid: Bool {
-        autoResizeGrid
+    /// Refreshes capabilities after the current delegate changes its host policy.
+    ///
+    /// The core protocol state is refreshed too: losing the complete
+    /// standard-clipboard service resets mode 5522 and revokes every grant,
+    /// paste token, and active write.
+    public func refreshKittyClipboardCapabilities() {
+        kittyClipboardBridge.capabilities.withLock {
+            $0 = terminalDelegate?.kittyClipboardCapabilities(source: self) ?? []
+        }
+        // The lock is not re-entrant, so a caller that already holds it -- a
+        // delegate assigned from inside `withTerminal` -- refreshes in place.
+        if terminal.terminalLock.isLockedByCurrentThread {
+            terminal.refreshKittyClipboardCapabilities()
+        } else {
+            withTerminal { $0.refreshKittyClipboardCapabilities() }
+        }
     }
 
-    private func resizeTerminalPreservingModes(cols: Int, rows: Int) {
-        let scrollTop = terminal.buffer.scrollTop
-        let scrollBottom = terminal.buffer.scrollBottom
-        let marginLeft = terminal.buffer.marginLeft
-        let marginRight = terminal.buffer.marginRight
-
-        terminal.resize(cols: cols, rows: rows)
-
-        let lastRow = max(0, terminal.rows - 1)
-        let restoredScrollTop = min(scrollTop, lastRow)
-        terminal.buffer.scrollTop = restoredScrollTop
-        terminal.buffer.scrollBottom = max(
-            restoredScrollTop,
-            min(scrollBottom, lastRow)
-        )
-
-        let lastColumn = max(0, terminal.cols - 1)
-        let restoredMarginLeft = min(marginLeft, lastColumn)
-        terminal.buffer.marginLeft = restoredMarginLeft
-        terminal.buffer.marginRight = max(
-            restoredMarginLeft,
-            min(marginRight, lastColumn)
-        )
-        sizeChanged(source: terminal)
+    public nonisolated func kittyClipboardCapabilities(
+        source: Terminal
+    ) -> KittyClipboardCapabilities {
+        kittyClipboardBridge.capabilities.withLock { $0 }
     }
+
+    @discardableResult
+    public nonisolated func kittyClipboardAvailableMimeTypes(
+        source: Terminal,
+        location: KittyClipboardLocation,
+        completion: @escaping @Sendable ([String]?) -> Void
+    ) -> Bool {
+        guard kittyClipboardCapabilities(source: source)
+            .allows(direction: .read, location: location)
+        else {
+            return false
+        }
+        onMain { [weak self] in
+            guard let self else {
+                completion(nil)
+                return
+            }
+            let custom = self.terminalDelegate?.kittyClipboardAvailableMimeTypes(
+                source: self,
+                location: location)
+            completion(custom ?? self.kittyClipboardPlatformAvailableMimeTypes(location: location))
+        }
+        return true
+    }
+
+    @discardableResult
+    public nonisolated func kittyClipboardRead(
+        source: Terminal,
+        location: KittyClipboardLocation,
+        mimeType: String,
+        completion: @escaping @Sendable (KittyClipboardReadResult) -> Void
+    ) -> Bool {
+        guard kittyClipboardCapabilities(source: source)
+            .allows(direction: .read, location: location)
+        else {
+            return false
+        }
+        onMain { [weak self] in
+            guard let self else {
+                completion(.unavailable)
+                return
+            }
+            let custom = self.terminalDelegate?.kittyClipboardRead(
+                source: self,
+                location: location,
+                mimeType: mimeType)
+            completion(custom ?? self.kittyPlatformRead(
+                location: location,
+                mimeType: mimeType))
+        }
+        return true
+    }
+
+    @discardableResult
+    public nonisolated func kittyClipboardWrite(
+        source: Terminal,
+        location: KittyClipboardLocation,
+        content: KittyClipboardWriteContent,
+        completion: @escaping @Sendable (KittyClipboardWriteResult) -> Void
+    ) -> Bool {
+        guard kittyClipboardCapabilities(source: source)
+            .allows(direction: .write, location: location)
+        else {
+            return false
+        }
+        onMain { [weak self] in
+            guard let self else {
+                completion(.ioError)
+                return
+            }
+            let custom = self.terminalDelegate?.kittyClipboardWrite(
+                source: self,
+                location: location,
+                content: content) ?? .unsupported
+            guard case .unsupported = custom else {
+                completion(custom)
+                return
+            }
+            completion(self.kittyPlatformWrite(location: location, content: content))
+        }
+        return true
+    }
+
+    @discardableResult
+    public nonisolated func kittyClipboardRequestPermission(
+        source: Terminal,
+        request: KittyClipboardPermissionRequest,
+        completion: @escaping @Sendable (KittyClipboardPermissionResult) -> Void
+    ) -> Bool {
+        guard kittyClipboardCapabilities(source: source)
+            .allows(direction: request.direction, location: request.location)
+        else {
+            return false
+        }
+        onMain { [weak self] in
+            guard let self, let delegate = self.terminalDelegate else {
+                completion(.deny)
+                return
+            }
+            completion(delegate.kittyClipboardRequestPermission(source: self, request: request))
+        }
+        return true
+    }
+
+    /// Diagnostics hook: called when a frame has been drawn.
+    ///
+    /// Metal calls it on a Metal thread as the command buffer completes; Core
+    /// Graphics calls it on the main thread at the end of `draw`. It exists to
+    /// measure input-to-glyph latency, which cannot be derived from the frame
+    /// counters — those say how many frames ran, not when the one carrying a
+    /// particular byte reached the screen (io-gaps.md C0.2 case 3).
+    ///
+    /// Static rather than per-view for two reasons. Only one terminal is under
+    /// measurement at a time, so per-view state would buy nothing; and a public
+    /// stored property on `TerminalView` puts its accessors in the class
+    /// vtable, where `LocalProcessTerminalView`'s metadata references them and
+    /// `-dead_strip` then removes them — the SwiftPM executables failed to link
+    /// with exactly that undefined symbol.
+    ///
+    /// Nil in normal use. Keep the closure short: it runs on the render path.
+    public nonisolated static var onFramePresented: (@Sendable () -> Void)? {
+        get { terminalFramePresentedHandler.current }
+        set { terminalFramePresentedHandler.replace(with: newValue) }
+    }
+
+    @MainActor
+    func configureInputSender() {
+        let owner = renderOwner
+        let notifyUI: @MainActor @Sendable () -> Void = { [weak self] in
+            guard let self else { return }
+            self.ensureCaretIsVisible()
+            if self.cursorBlinkResetsOnInput {
+                self.caretView?.resetBlinkAfterInput()
+#if canImport(MetalKit)
+                owner.resetMetalCursorBlinkAfterInput()
+#endif
+            }
+        }
+        let deliverOnMain: @MainActor @Sendable ([UInt8]) -> Void = { [weak self] bytes in
+            guard let self else { return }
+            self.terminalDelegate?.send(source: self, data: bytes[...])
+        }
+        let mainDelivery = TerminalInputMainActorDelivery(sink: deliverOnMain)
+        inputSender.configure(
+            registerInput: { bytes in owner.registerUserInput(bytes) },
+            notifyUI: notifyUI,
+            deliver: { bytes in mainDelivery.enqueue(bytes) },
+            deliverOnMain: { bytes in mainDelivery.enqueue(bytes) },
+            deliverRegistered: { bytes in mainDelivery.enqueue(bytes, deferDelivery: true) })
+    }
+
+    @MainActor
+    func configureFeedSender() {
+        let owner = renderOwner
+        let signal = frameSignal
+        let diagnosticsState = diagnosticsState
+        feedSender.configure(
+            feedBytes: { bytes in
+                signal.markDirty()
+                let parse = Profiling.begin(.ioParse, "bytes=%d", bytes.count)
+                _ = owner.feed(bytes: bytes[...])
+                parse.end()
+                diagnosticsState.withLock { diagnostics in
+                    diagnostics.bytesFed += bytes.count
+                    diagnostics.batches += 1
+                }
+                signal.markDirty()
+            },
+            feedText: { text in
+                signal.markDirty()
+                _ = owner.feed(text: text)
+                diagnosticsState.withLock { diagnostics in
+                    diagnostics.bytesFed += text.utf8.count
+                    diagnostics.batches += 1
+                }
+                signal.markDirty()
+            })
+    }
+
     typealias CellDimension = CGSize
+
+    // Reads the viewStateLock-guarded mirror of `terminal.reverseColors`,
+    // refreshed synchronously by the colorChanged delegate (which DECSCNM
+    // always fires, under the terminal lock). Reading the terminal directly
+    // here would race the parse thread: these properties are used on unlocked
+    // main-thread draw paths (caret layer, Metal clear color, IME overlay).
+    nonisolated func reverseColorsActiveValue () -> Bool
+    {
+        crossThreadState.withLock { $0.reverseColorsActive }
+    }
+
+    nonisolated func setReverseColorsActive (_ value: Bool)
+    {
+        crossThreadState.withLock { $0.reverseColorsActive = value }
+    }
 
     var effectiveNativeForegroundColor: TTColor {
 #if os(macOS)
-        terminal.reverseColors ? nativeBackgroundColor : nativeForegroundColor
+        reverseColorsActiveValue() ? nativeBackgroundColor : nativeForegroundColor
 #else
-        guard terminal.reverseColors else { return nativeForegroundColor }
+        guard reverseColorsActiveValue() else { return nativeForegroundColor }
         if nativeBackgroundColor.cgColor.alpha > 0 {
             return nativeBackgroundColor
         }
@@ -303,7 +1604,7 @@ extension TerminalView {
     }
 
     var effectiveNativeBackgroundColor: TTColor {
-        terminal.reverseColors ? nativeForegroundColor : nativeBackgroundColor
+        reverseColorsActiveValue() ? nativeForegroundColor : nativeBackgroundColor
     }
 
     var effectiveCaretColor: TTColor {
@@ -322,20 +1623,15 @@ extension TerminalView {
     /// Defaults to `true` (standard macOS font smoothing).
     @objc open var fontSmoothing: Bool {
         get { _fontSmoothing }
-        set {
-            guard _fontSmoothing != newValue else { return }
-            _fontSmoothing = newValue
-#if canImport(MetalKit)
-            metalRenderer?.resetGlyphRasterizationCache()
-#endif
-            terminal.updateFullScreen()
-            queuePendingDisplay()
-        }
+        set { _fontSmoothing = newValue }
     }
 #endif
 
     /// Multiplier for vertical line spacing. 1.0 = default (ascent + descent + leading).
     /// Set to 1.1 for 110% vertical spacing (matches iTerm2's vertical spacing setting).
+    /// The extra height is split evenly above and below each glyph (see
+    /// ``CellGeometry/baselineOffset(normalFont:cellHeight:)``), so text stays vertically
+    /// centered within its cell.
     /// Triggers a font reset and terminal resize when changed.
     @objc open var lineSpacing: CGFloat {
         get { _lineSpacing }
@@ -351,104 +1647,28 @@ extension TerminalView {
         self.urlAttributes = [:]
         self.colors = Array(repeating: nil, count: 256)
         self.trueColors = [:]
-        resetLineInfoCache()
-    }
-
-    func resetLineInfoCache()
-    {
-        lineInfoCache.removeAll()
-        lineInfoInvalidationGenerations.removeAll()
-        lineInfoCacheGeneration &+= 1
-    }
-
-    func lineInfoInvalidationGeneration(for line: BufferLine) -> UInt64
-    {
-        lineInfoInvalidationGenerations[ObjectIdentifier(line)] ?? 0
-    }
-
-#if canImport(MetalKit)
-    func setMetalDirtyRange(_ range: ClosedRange<Int>?)
-    {
-        metalDirtyRange = range
-        metalDirtyRangeFullRefreshGeneration = range == nil ? nil : terminal.fullRefreshGeneration
-    }
-
-    func consumeMetalDirtyRange() -> (range: ClosedRange<Int>?, fullRefreshGeneration: UInt64?)
-    {
-        let result = (metalDirtyRange, metalDirtyRangeFullRefreshGeneration)
-        metalDirtyRange = nil
-        metalDirtyRangeFullRefreshGeneration = nil
-        return result
-    }
-#endif
-
-    func invalidateLineInfoCache(row: Int)
-    {
-        lineInfoCache.removeValue(forKey: row)
-        let buffer = terminal.displayBuffer
-        guard row >= 0 && row < buffer.lines.count else { return }
-        let lineIdentifier = ObjectIdentifier(buffer.lines[row])
-        lineInfoInvalidationGenerations[lineIdentifier, default: 0] &+= 1
-    }
-
-    func pruneLineInfoCache(to visibleRows: ClosedRange<Int>)
-    {
-        if !lineInfoCache.isEmpty {
-            lineInfoCache = lineInfoCache.filter { visibleRows.contains($0.key) }
-        }
-        if !lineInfoInvalidationGenerations.isEmpty {
-            let buffer = terminal.displayBuffer
-            let visibleLineIdentifiers = Set<ObjectIdentifier>(visibleRows.compactMap { row in
-                guard row >= 0 && row < buffer.lines.count else { return nil }
-                return ObjectIdentifier(buffer.lines[row])
-            })
-            lineInfoInvalidationGenerations = lineInfoInvalidationGenerations.filter {
-                visibleLineIdentifiers.contains($0.key)
-            }
-        }
-    }
-
-    func cachedLineInfo(row: Int, line: BufferLine, cols: Int) -> ViewLineInfo
-    {
-        if let cached = lineInfoCache[row],
-           cached.lineRef === line,
-           cached.generation == line.generation,
-           cached.cols == cols,
-           cached.cacheGeneration == lineInfoCacheGeneration {
-            return cached.info
-        }
-
-        let info = buildAttributedString(row: row, line: line, cols: cols)
-        lineInfoCache[row] = LineInfoCacheEntry(lineRef: line,
-                                                generation: line.generation,
-                                                cols: cols,
-                                                cacheGeneration: lineInfoCacheGeneration,
-                                                info: info)
-        return info
     }
     
+    /// Pixel-derived geometry may mutate the logical grid only when the
+    /// consumer has opted into the historical auto-resize behavior.
+    var boundsMayMutateGrid: Bool {
+        autoResizeGrid
+    }
+
     // This is invoked when the font changes to recompute state
     func resetFont(preservingTerminalModes: Bool = false)
     {
-#if canImport(MetalKit)
-        metalRenderer?.resetFontCaches()
-#endif
         resetCaches()
         self.cellDimension = computeFontDimensions ()
-        if (frame.width > 0) && (frame.height > 0) {
+        refreshCachedViewState()
+        if (frame.width > 0) && (frame.height > 0) && boundsMayMutateGrid {
             // Use getEffectiveWidth so the scroller's reserved width is taken
             // into account, matching processSizeChange(). Computing columns from
             // the raw frame width here would over-count by the scroller width,
             // so zooming the font in and back out would drift the column count.
             let newCols = Int(getEffectiveWidth(size: frame.size) / cellDimension.width)
             let newRows = Int(frame.height / cellDimension.height)
-            if boundsMayMutateGrid {
-                if preservingTerminalModes {
-                    resizeTerminalPreservingModes(cols: newCols, rows: newRows)
-                } else {
-                    resize(cols: newCols, rows: newRows)
-                }
-            }
+            resize(cols: newCols, rows: newRows, preservingTerminalModes: preservingTerminalModes)
         }
         updateCaretView()
         
@@ -480,40 +1700,59 @@ extension TerminalView {
 
         let zeroSizedView = width == 0 && height == 0
         let creatingTerminal = terminal == nil
+        var terminalOptions = terminal.map { terminal in
+            terminal.terminalLock.withLock { terminal.options }
+        } ?? startupOptions
         if creatingTerminal {
-            var opts = startupOptions
+            // Construct at the resolved grid; the terminal never starts at a
+            // provisional size and resizes into place.
             switch initialGeometry {
             case .grid(let cols, let rows):
-                opts.cols = cols
-                opts.rows = rows
+                terminalOptions.cols = cols
+                terminalOptions.rows = rows
             case .viewport(points: let size) where size.width.isFinite && size.height.isFinite &&
                                                    size.width > 0 && size.height > 0:
-                opts.cols = Int(getEffectiveWidth(size: size) / cellDimension.width)
-                opts.rows = Int(size.height / cellDimension.height)
+                terminalOptions.cols = Int(getEffectiveWidth(size: size) / cellDimension.width)
+                terminalOptions.rows = Int(size.height / cellDimension.height)
             case .viewport, .none:
-                if initialGeometry == nil && (width != 0 || height != 0) {
-                    opts.cols = Int(width / cellDimension.width)
-                    opts.rows = Int(height / cellDimension.height)
+                if initialGeometry == nil && !zeroSizedView {
+                    terminalOptions.cols = Int(width / cellDimension.width)
+                    terminalOptions.rows = Int(height / cellDimension.height)
                 }
             }
-            terminal = Terminal(delegate: self, options: opts)
         } else if !zeroSizedView {
-            var opts = terminal.options
-            opts.cols = Int(width / cellDimension.width)
-            opts.rows = Int(height / cellDimension.height)
-            terminal.options = opts
-            terminal.setup(isReset: false)
-        }
-        if creatingTerminal {
-            terminal.backgroundColor = Color.defaultBackground
-            terminal.foregroundColor = Color.defaultForeground
+            terminalOptions.cols = Int(width / cellDimension.width)
+            terminalOptions.rows = Int(height / cellDimension.height)
         }
 
-        selection = SelectionService(terminal: terminal)
-        
+        if creatingTerminal {
+            terminal = ViewTerminal(
+                delegate: self,
+                options: terminalOptions,
+                synchronizedOutputWatchdogHandler:
+                    renderOwner.synchronizedOutputWatchdogHandler()
+            ) { [weak self] _ in
+                self?.markScrolledDirty()
+                self?.frameSignal.markDirty()
+            }
+        } else if !zeroSizedView {
+            terminal.terminalLock.withLock {
+                terminal.options = terminalOptions
+                terminal.setup(isReset: false)
+            }
+        }
+        let cursorStyle = terminal.terminalLock.withLock {
+            terminal.allowsViewResize = autoResizeGrid
+            terminal.viewResizeGeneration &+= 1
+            terminal.backgroundColor = Color.defaultBackground
+            terminal.foregroundColor = Color.defaultForeground
+            selection = SelectionService(terminal: terminal)
+            return terminal.options.cursorStyle
+        }
+
         // Install carret view
         if caretView == nil {
-            let v = CaretView(frame: CGRect(origin: .zero, size: CGSize(width: cellDimension.width, height: cellDimension.height)), cursorStyle: terminal.options.cursorStyle, terminal: self)
+            let v = CaretView(frame: CGRect(origin: .zero, size: CGSize(width: cellDimension.width, height: cellDimension.height)), cursorStyle: cursorStyle, terminal: self)
             addSubview(v)
             caretView = v
         } else {
@@ -521,6 +1760,14 @@ extension TerminalView {
         }
         
         search = SearchService (terminal: terminal)
+        renderOwner.attach(terminal: terminal, selection: selection, search: search)
+        refreshCachedViewState()
+        let cellPixels = currentCellPixelSize()
+        terminal.terminalLock.withLock {
+            terminal.updatePixelGeometry(
+                cellWidth: cellPixels.width,
+                cellHeight: cellPixels.height)
+        }
         
         #if os(macOS)
         needsDisplay = true
@@ -529,14 +1776,271 @@ extension TerminalView {
         #endif
     }
 
-    /// Returns the underlying terminal emulator that the `TerminalView` is a view for
-    public func getTerminal () -> Terminal
+    /// Whether the backspace key sends BS (^H) instead of DEL: the host set
+    /// `backspaceSendsControlH`, or the application set DECBKM.
+    var backspaceKeySendsControlH: Bool {
+        backspaceSendsControlH || withTerminal { $0.backarrowKeyMode }
+    }
+
+    /// Runs `body` while holding the terminal lock.
+    ///
+    /// The closure must not call another API that synchronously acquires the
+    /// terminal lock. Helpers that assume the lock is held use the `Locked`
+    /// suffix and assert that contract in DEBUG builds.
+    func withTerminal<T> (_ body: (Terminal) throws -> T, caller: StaticString = #function) rethrows -> T
     {
-        return terminal
+        if ProfilingStats.enabled && Thread.isMainThread {
+            ProfilingLockCallers.shared.record(caller)
+        }
+        return try terminal.terminalLock.withLock {
+            try body(terminal)
+        }
+    }
+
+    /// Returns the current terminal grid size as a copied value.
+    public nonisolated var terminalDimensions: TerminalDimensions {
+        renderOwner.dimensions()
+    }
+
+    /// Accept OSC 8 hyperlinks. The default is true.
+    /// Changes also apply to links already in the terminal buffer.
+    /// Implicit URL and path detection remain available when this is false.
+    public var enableOsc8Hyperlinks: Bool {
+        get { withTerminal { $0.enableOsc8Hyperlinks } }
+        set {
+            withTerminal { $0.enableOsc8Hyperlinks = newValue }
+            linkHighlightRange = nil
+#if os(macOS)
+            removePreviewUrl()
+#endif
+            frameDriver.markDirty()
+        }
+    }
+
+    /// The kitty keyboard protocol flags the running application has enabled, as a copied value.
+    ///
+    /// A host that handles key events in front of the view needs this to know when SwiftTerm
+    /// will encode a key itself. `keyDown` is `public override` rather than `open`, so an
+    /// application that rebinds a chord does it in an event monitor ahead of the view; when the
+    /// application running in the terminal has enabled the protocol, that monitor has to stand
+    /// down and let SwiftTerm produce the real encoding. The view's own key handling reads the
+    /// same flags for the same decision.
+    ///
+    /// The flags are per-buffer: switching to the alternate buffer swaps in its own state.
+    public nonisolated var keyboardEnhancementFlags: KittyKeyboardFlags {
+        renderOwner.keyboardEnhancementFlags()
+    }
+
+    /// The text of the visible rows in `rows`, as copied values.
+    ///
+    /// For a host that reads a few rows often — a prompt detector watching the bottom of the
+    /// screen on a timer, a click that needs the row under the pointer. It takes the same lock
+    /// as ``terminalStateSnapshot()`` but copies only the rows asked for, where the snapshot
+    /// copies every visible row with its cell widths. Each row is the same text
+    /// ``TerminalVisibleRowSnapshot/text`` holds — the same conversion: a wide glyph's
+    /// continuation cell is skipped, an unwritten cell before text reads as a space, trailing
+    /// unwritten cells are dropped, and no NUL ever appears. Rows are zero-based from the top of
+    /// the viewport and clamped to the screen; an empty or fully off-screen range yields no rows.
+    ///
+    /// - Parameter rows: The visible rows to copy, `0..<rows` being the whole screen.
+    public nonisolated func visibleRowsText(_ rows: Range<Int>) -> [String] {
+        renderOwner.visibleRowsText(rows)
+    }
+
+    /// Returns copied terminal state for status displays and diagnostics.
+    public nonisolated func terminalStateSnapshot() -> TerminalViewStateSnapshot {
+        renderOwner.stateSnapshot()
+    }
+
+    /// Copies input modes and dimensions without copying any rows.
+    ///
+    /// Safe to call from any thread, but not from a terminal delegate callback
+    /// that already holds the terminal lock.
+    /// Returns nil when no terminal session is attached.
+    public nonisolated func terminalInputStateSnapshot() -> TerminalInputStateSnapshot? {
+        renderOwner.inputStateSnapshot()
+    }
+
+    /// Copies a bounded region and its input state in one transaction.
+    ///
+    /// Safe to call from any thread, but not from a terminal delegate callback
+    /// that already holds the terminal lock.
+    ///
+    /// The snapshot is useful for inspection and bounded text capture. It does
+    /// not include images, hyperlinks, or palette values, and is not sufficient
+    /// to reproduce the full display.
+    /// Returns nil when no terminal session is attached. The returned values
+    /// remain valid after later feeds, resizes, scrolls, and history trimming.
+    public nonisolated func terminalContentSnapshot(
+        region: TerminalContentRegion,
+        buffer: Terminal.BufferKind = .active
+    ) -> TerminalContentSnapshot? {
+        renderOwner.contentSnapshot(region: region, buffer: buffer)
+    }
+
+    /// Copies terminal buffer contents without exposing the mutable terminal.
+    public nonisolated func getBufferAsData(
+        kind: Terminal.BufferKind = .active,
+        encoding: String.Encoding = .utf8
+    ) -> Data {
+        renderOwner.bufferData(kind: kind, encoding: encoding)
+    }
+
+    /// Observes copied OSC sequences as the view's terminal encounters them,
+    /// without changing how the view handles them.
+    ///
+    /// This forwards to ``Terminal/observeOscEvents(_:)`` on the terminal the
+    /// view owns, so a host can react to sequences the view does not surface
+    /// itself — desktop notifications sent with OSC 9, 99 or 777, for
+    /// instance — without access to the mutable terminal. Events are delivered
+    /// asynchronously on a private serial queue in encounter order. Retain the
+    /// returned token for as long as events are needed.
+    @MainActor
+    public func observeOscEvents(
+        _ handler: @escaping @Sendable (TerminalOscEvent) -> Void
+    ) -> TerminalOscObservation {
+        terminal.observeOscEvents(handler)
+    }
+
+    /// Records the light/dark preference represented by the current palette and optionally
+    /// notifies an application that subscribed with `CSI ? 2031 h`.
+    ///
+    /// Call this after installing the palette so the application's follow-up OSC 10/11 query
+    /// sees the new colors. Pass `notify: false` to record the preference without announcing it,
+    /// then call ``notifyColorScheme()`` when the host is ready for the application to re-query.
+    public nonisolated func updateColorScheme(
+        _ colorScheme: TerminalColorScheme,
+        notify: Bool = true
+    ) {
+        renderOwner.updateColorScheme(colorScheme, notify: notify)
+    }
+
+    /// Re-sends the current light/dark preference when the application subscribed with
+    /// `CSI ? 2031 h`.
+    public nonisolated func notifyColorScheme() {
+        renderOwner.notifyColorScheme()
+    }
+
+    /// Returns the closest primary semantic-prompt row above the viewport.
+    public nonisolated func previousSemanticPromptRow() -> Int? {
+        renderOwner.semanticPromptRow(searchingUpward: true)
+    }
+
+    /// Returns the closest primary semantic-prompt row below the viewport.
+    public nonisolated func nextSemanticPromptRow() -> Int? {
+        renderOwner.semanticPromptRow(searchingUpward: false)
+    }
+
+    /// Performs DECSTR through the normal parser feed path.
+    public nonisolated func softReset() {
+        feedSender.feed(text: "\u{1b}[!p")
+    }
+
+    /// Performs RIS through the normal parser feed path.
+    public nonisolated func resetToInitialState() {
+        feedSender.feed(text: "\u{1b}c")
+    }
+
+    /// Changes the cursor style without sending data to the host.
+    public func setCursorStyle(_ style: CursorStyle) {
+        renderOwner.setCursorStyle(style)
+        frameSignal.markDirty()
+    }
+
+    /// Strategy used to derive palette entries 16 through 255.
+    public var ansi256PaletteStrategy: Ansi256PaletteStrategy {
+        get { renderOwner.ansi256PaletteStrategy() }
+        set {
+            renderOwner.setAnsi256PaletteStrategy(newValue)
+            frameSignal.markDirty()
+        }
+    }
+
+    /// Maximum number of rows in one bidi paragraph.
+    public var maximumBidiParagraphRows: Int {
+        get { renderOwner.maximumBidiParagraphRows() }
+        set {
+            renderOwner.setMaximumBidiParagraphRows(newValue)
+            frameSignal.markDirty()
+        }
+    }
+
+    nonisolated func onMain (_ body: @escaping @MainActor @Sendable () -> Void,
+                            caller: StaticString = #function)
+    {
+        let recordedBody: @MainActor @Sendable () -> Void = { [weak self] in
+            self?.recordMainHop()
+            body()
+        }
+        let dispatchBody: @Sendable () -> Void = {
+            MainActor.assumeIsolated {
+                recordedBody()
+            }
+        }
+        if ProfilingStats.enabled {
+            ProfilingHopCounter.shared.record(caller)
+        }
+        DispatchQueue.main.async(execute: dispatchBody)
+    }
+
+    func recordMainHop ()
+    {
+        diagnosticsState.withLock { $0.mainHops += 1 }
     }
     
     /// This function computes the new columns and rows for the terminal when a pixel-size changes
     /// Returns true if this changed the number of columns/rows, false otherwise
+    /// Records a size for the next frame to apply, instead of resizing the
+    /// terminal now.
+    ///
+    /// A live window drag calls `setFrameSize` on every step, and each
+    /// synchronous `processSizeChange` took the terminal lock, resized, soft
+    /// reset the scroll region, invalidated search and notified the delegate —
+    /// which does the pty `ioctl`. Coalescing to one resize per frame is what
+    /// Ghostty does with a timer on its IO thread (io-gaps.md G5b).
+    ///
+    /// The geometry is computed here, on main, on purpose: it reads
+    /// `cellDimension` and the scroller's width, which are view state. Only
+    /// the resulting cell counts cross to the frame path, which may run on the
+    /// render loop.
+    ///
+    /// **Only use this during a live resize.** Deferring `sizeChanged` to a
+    /// later frame breaks the re-entrancy guard that hosts write around it:
+    ///
+    /// ```swift
+    /// func sizeChanged(...) {
+    ///     if changingSize { return }        // never true any more
+    ///     changingSize = true
+    ///     window.setFrame(optimalSize, display: true, animate: true)
+    ///     changingSize = false              // reset before the callback lands
+    /// }
+    /// ```
+    ///
+    /// Synchronously, the frame change re-enters `sizeChanged` inside that
+    /// guard and stops. Deferred, the callback arrives a frame later with the
+    /// flag already cleared, so every intermediate frame of the animation
+    /// starts another animation. Measured on the resize-under-flood case:
+    /// main-thread stall p99 went from 16–28 ms to 133–205 ms. MacTerminal is
+    /// the host in question and the pattern is entirely ordinary.
+    func queueSizeChange (newSize: CGSize) {
+        if newSize.width == 0 && newSize.height == 0 {
+            return
+        }
+        guard boundsMayMutateGrid else { return }
+        let newRows = Int (newSize.height / cellDimension.height)
+        let newCols = Int (getEffectiveWidth (size: newSize) / cellDimension.width)
+
+        let generation = withTerminal { $0.viewResizeGeneration }
+        renderOwner.mailbox.queueSize(cols: newCols, rows: newRows, generation: generation)
+        frameDriver?.markDirty()
+    }
+
+    /// Resizes the terminal immediately.
+    ///
+    /// Still the right call for a one-off change — a font change, a
+    /// programmatic resize, iOS layout — where the caller expects
+    /// `terminal.cols` to be correct when it returns. The live-drag path uses
+    /// `queueSizeChange` instead.
     @discardableResult
     func processSizeChange (newSize: CGSize) -> Bool {
         if newSize.width == 0 && newSize.height == 0 {
@@ -545,25 +2049,112 @@ extension TerminalView {
         guard boundsMayMutateGrid else { return false }
         let newRows = Int (newSize.height / cellDimension.height)
         let newCols = Int (getEffectiveWidth (size: newSize) / cellDimension.width)
+        let cellPixels = currentCellPixelSize()
         
-        if newCols != terminal.cols || newRows != terminal.rows {
-            selection.active = false
-            terminal.resize (cols: newCols, rows: newRows)
-            
-            // These used to be outside
+        var didResize = false
+        withTerminal { terminal in
+            terminal.viewResizeGeneration &+= 1
+            if newCols != terminal.cols || newRows != terminal.rows {
+                selection.active = false
+                terminal.resize(
+                    cols: newCols,
+                    rows: newRows,
+                    cellWidth: cellPixels.width,
+                    cellHeight: cellPixels.height)
+                search.invalidate ()
+                didResize = true
+            } else {
+                terminal.updatePixelGeometry(
+                    cellWidth: cellPixels.width,
+                    cellHeight: cellPixels.height)
+            }
+        }
+        if didResize {
             accessibility.invalidate ()
-            search.invalidate ()
-            
             terminalDelegate?.sizeChanged (source: self, newCols: newCols, newRows: newRows)
-           
             updateScroller()
             return true
         }
         return false
     }
+
+    func refreshCachedViewState ()
+    {
+        let scale = backingScaleFactor()
+        let imageScale = getImageScale()
+        let pixelSize: (width: Int, height: Int)?
+        let currentCellDimension: CellDimension? = cellDimension
+        if let currentCellDimension {
+            pixelSize = (Int(round(currentCellDimension.width * scale)), Int(round(currentCellDimension.height * scale)))
+        } else {
+            pixelSize = nil
+        }
+        let nativeColors: (foreground: Color, background: Color)?
+        if _nativeFg != nil && _nativeBg != nil {
+            nativeColors = (nativeForegroundColor.getTerminalColor(), nativeBackgroundColor.getTerminalColor())
+        } else {
+            nativeColors = nil
+        }
+
+        crossThreadState.withLock { state in
+            state.cachedCellPointSize = currentCellDimension
+            state.cachedImageScale = imageScale
+            state.cachedCellPixelSize = pixelSize
+            state.cachedNativeColors = nativeColors
+        }
+    }
+
+    nonisolated func cachedCellPixelSizeValue () -> (width: Int, height: Int)?
+    {
+        crossThreadState.withLock { $0.cachedCellPixelSize }
+    }
+
+    private func currentCellPixelSize() -> (width: Int, height: Int) {
+        let scale = backingScaleFactor()
+        return (
+            cellPixelDimension(cellDimension.width, scale: scale),
+            cellPixelDimension(cellDimension.height, scale: scale))
+    }
+
+    nonisolated func cachedNativeColorsValue () -> (foreground: Color, background: Color)?
+    {
+        crossThreadState.withLock { $0.cachedNativeColors }
+    }
+
+    nonisolated func cachedImageMetricsValue () -> (cellSize: CGSize, imageScale: CGFloat)?
+    {
+        crossThreadState.withLock { state in
+            guard let cellSize = state.cachedCellPointSize,
+                  let imageScale = state.cachedImageScale else {
+                return nil
+            }
+            return (cellSize, imageScale)
+        }
+    }
+
+    nonisolated func markScrolledDirty ()
+    {
+        crossThreadState.withLock { $0.scrolledDirty = true }
+    }
+
+    func consumeScrolledDirty () -> Bool
+    {
+        crossThreadState.withLock { state in
+            let dirty = state.scrolledDirty
+            state.scrolledDirty = false
+            return dirty
+        }
+    }
+
+    private func setAccessibilityNotificationForNextFrame (_ shouldNotify: Bool) {
+        renderOwner.mailbox.setAccessibilityNotification(shouldNotify)
+    }
     
+    // Computes the font dimensions once font.normal has been set
     /// Computes the cell dimensions used by `TerminalView` for a font and display scale.
     ///
+    /// This is the single owner of cell snapping; hosts that need the grid
+    /// size before a view exists must call it rather than duplicating it.
     /// - Parameters:
     ///   - font: The terminal font.
     ///   - backingScale: The number of device pixels per point.
@@ -576,18 +2167,13 @@ extension TerminalView {
         let lineLeading = CTFontGetLeading (font)
         let cellHeight = ceil((lineAscent + lineDescent + lineLeading) * lineSpacing)
         #if os(macOS)
-        // The following is a more robust way of getting the largest ascii character width, but comes with a performance hit.
-        // See: https://github.com/migueldeicaza/SwiftTerm/issues/286
-        // var sizes = UnsafeMutablePointer<NSSize>.allocate(capacity: 95)
-        // let ctFont = (font as CTFont)
-        // var glyphs = (32..<127).map { CTFontGetGlyphWithName(ctFont, String(Unicode.Scalar($0)) as CFString) }
-        // withUnsafePointer(to: glyphs[0]) { glyphsPtr in
-        //     fontSet.normal.getAdvancements(NSSizeArray(sizes), forCGGlyphs: glyphsPtr, count: 95)
-        // }
-        // let cellWidth = (0..<95).reduce(into: 0) { partialResult, idx in
-        //     partialResult = max(partialResult, sizes[idx].width)
-        // }
-        let glyph = font.glyph(withName: "W")
+        // Look W up by character, not by glyph name: fonts whose glyphs are
+        // unnamed or named by CID (BIZ UDGothic, STHeiti, Songti) have no glyph
+        // named "W", and the name lookup returns .notdef, which is usually a
+        // full em wide and spreads the text across twice as many columns.
+        var characters: [UniChar] = [0x57]
+        var glyphs: [CGGlyph] = [0]
+        let glyph = CTFontGetGlyphsForCharacters (font, &characters, &glyphs, 1) ? NSGlyph (glyphs [0]) : font.glyph(withName: "W")
         let cellWidth = font.advancement(forGlyph: glyph).width
         #else
         let fontAttributes = [NSAttributedString.Key.font: font]
@@ -602,9 +2188,68 @@ extension TerminalView {
     // Computes the font dimensions once font.normal has been set.
     func computeFontDimensions (backingScale: CGFloat? = nil) -> CellDimension
     {
-        Self.cellMetrics(font: fontSet.normal,
-                         backingScale: backingScale ?? backingScaleFactor(),
-                         lineSpacing: _lineSpacing)
+        let scale = backingScale ?? backingScaleFactor()
+        if backingScale == nil {
+            // Remembered so the grid can be re-snapped when the view moves to a
+            // screen with a different pixel density; see
+            // `remeasureCellDimensionIfBackingScaleChanged`.
+            cellDimensionBackingScale = scale
+        }
+        return Self.cellMetrics(font: fontSet.normal, backingScale: scale, lineSpacing: _lineSpacing)
+    }
+
+    /// Re-snaps the cell grid when the view's pixel density no longer matches
+    /// the one `computeFontDimensions` measured against.
+    ///
+    /// The cell width and height are snapped to the pixel grid of the screen
+    /// the view was on when the font was set. Without this, moving the window
+    /// to a screen with another backing scale (an external monitor to a
+    /// Retina laptop display, or back) kept drawing a grid snapped for the
+    /// old screen: cell edges fell between pixels, glyphs bled into their
+    /// neighbours and the column count no longer matched the width.
+    ///
+    /// Only runs while the view has a window: a detached view would measure
+    /// against `NSScreen.main`, so it keeps its grid until it is attached.
+    ///
+    /// Unlike `resetFont`, this does not go through `resize(cols:rows:)`,
+    /// whose `softReset()` would clear modes set by the running program.
+    /// `processSizeChange` resizes the terminal only when the rows or columns
+    /// change, and otherwise just updates the pixel geometry. Returns whether
+    /// the grid was re-measured.
+    @discardableResult
+    func remeasureCellDimensionIfBackingScaleChanged () -> Bool
+    {
+        guard window != nil, cellDimension != nil, backingScaleFactor() != cellDimensionBackingScale else {
+            return false
+        }
+        cellDimension = computeFontDimensions()
+        refreshCachedViewState()
+        processSizeChange(newSize: frame.size)
+        // Core Graphics draws from the frame snapshot. If the grid still has
+        // the same row and column counts, a size change leaves no dirty rows;
+        // request a full frame after the snapshot has the new cell geometry.
+        withTerminal { $0.updateFullScreen() }
+        // A live resize may have queued counts measured with the old cell
+        // size (or a frame may already be applying them), and the next frame
+        // would restore them over the ones just set. Queue the corrected
+        // counts in their place; if they match, the frame only updates the
+        // pixel geometry.
+        queueSizeChange(newSize: frame.size)
+        updateCaretView()
+        #if os(macOS)
+        needsDisplay = true
+        #else
+        setNeedsDisplay(frame)
+        #endif
+        return true
+    }
+
+    /// ``CellGeometry/baselineOffset(normalFont:cellHeight:)`` for this view's
+    /// current font and cell geometry.
+    var baselineOffset: CGFloat {
+        let currentCellDimension: CellDimension? = cellDimension
+        return CellGeometry.baselineOffset (normalFont: fontSet.normal,
+                                            cellHeight: currentCellDimension?.height ?? 0)
     }
 
     /// Computes how to center `glyph` within its `columnWidth`-cell slot (and
@@ -614,54 +2259,61 @@ extension TerminalView {
     /// CoreGraphics and Metal glyph renderers so they stay pixel-consistent.
     func glyphSlotFit (font: CTFont, glyph: CGGlyph, columnWidth: Int) -> GlyphSlotFit
     {
-        // Only wide cells need adjusting: a single-width glyph in a monospace
-        // font already fills its cell, so we skip the metric lookups entirely.
-        guard columnWidth >= 2, cellDimension != nil else { return .identity }
+        let currentCellDimension: CellDimension? = cellDimension
+        guard let currentCellDimension else { return .identity }
+        return GlyphSlotFit.calculate(font: font, glyph: glyph,
+                                      columnWidth: columnWidth,
+                                      cellDimension: currentCellDimension,
+                                      normalFont: fontSet.normal)
+    }
 
-        let cellWidth = cellDimension.width
-        let cellHeight = cellDimension.height
-        let slotWidth = CGFloat(columnWidth) * cellWidth
+    /// ``GlyphSlotFit/fitFallbackToCell(metrics:cellWidth:renderingScale:)``
+    /// in point space, for the CoreGraphics draw path and the caret.
+    func fallbackGlyphFit (font: CTFont, glyph: CGGlyph) -> GlyphSlotFit
+    {
+        let currentCellDimension: CellDimension? = cellDimension
+        guard let currentCellDimension else { return .identity }
+        return GlyphSlotFit.fitFallbackToCell(metrics: GlyphMetrics.measure(font: font, glyph: glyph),
+                                              cellWidth: currentCellDimension.width,
+                                              renderingScale: 1)
+    }
 
-        var g = glyph
-        var advance = CGSize.zero
-        CTFontGetAdvancesForGlyphs(font, .horizontal, &g, &advance, 1)
-        guard advance.width > 0 else { return .identity }
+    /// True when `font` is one of the view's fonts; false for a font
+    /// CoreText substituted from its fallback cascade.
+    func isPrimaryFont (_ font: CTFont) -> Bool
+    {
+        CFEqual(font, fontSet.normal) || CFEqual(font, fontSet.bold)
+            || CFEqual(font, fontSet.italic) || CFEqual(font, fontSet.boldItalic)
+    }
 
-        var ink = CGRect.zero
-        CTFontGetBoundingRectsForGlyphs(font, .horizontal, &g, &ink, 1)
-
-        // Scale down only when the ink would spill outside its slot (rare; this
-        // protects oversized substitute glyphs). Never enlarge.
-        var scale: CGFloat = 1
-        if ink.width > slotWidth || ink.height > cellHeight, ink.width > 0, ink.height > 0 {
-            scale = max(0.1, min(min(slotWidth / ink.width, cellHeight / ink.height), 1))
-        }
-
-        // Center the (scaled) advance box horizontally in the slot. Centering by
-        // advance rather than ink keeps glyphs that are intentionally off-center
-        // within their em square — e.g. the CJK comma `、` — in their place.
-        let dx = (slotWidth - advance.width * scale) / 2
-
-        // Preserve the natural Latin baseline unless the glyph was scaled, in
-        // which case center its ink vertically so it doesn't sit too low/high.
-        var dy: CGFloat = 0
-        if scale < 1, ink.height > 0 {
-            let baselineFromBottom = ceil(CTFontGetDescent(fontSet.normal) + CTFontGetLeading(fontSet.normal))
-            let inkCenterFromBaseline = (ink.origin.y + ink.height / 2) * scale
-            dy = (cellHeight / 2 - baselineFromBottom) - inkCenterFromBaseline
-        }
-
-        return GlyphSlotFit(dx: dx, dy: dy, scale: scale)
+    /// Policy-aware variant for host glyph-fallback runs: applies the run's
+    /// ``TerminalGlyphPlacementPolicy`` to one- and multi-column glyphs. Point
+    /// space, like the CoreGraphics draw path that calls it.
+    func glyphSlotFit (font: CTFont, glyph: CGGlyph, columnWidth: Int,
+                       policy: TerminalGlyphPlacementPolicy) -> GlyphSlotFit
+    {
+        let currentCellDimension: CellDimension? = cellDimension
+        guard let currentCellDimension else { return .identity }
+        let normalFont = fontSet.normal
+        let metrics = GlyphMetrics.measure(font: font, glyph: glyph)
+        let baselineFromBottom = CellGeometry.baselineOffset(
+            normalFont: normalFont, cellHeight: currentCellDimension.height)
+        return GlyphSlotFit.calculate(metrics: metrics,
+                                      policy: policy,
+                                      columnWidth: columnWidth,
+                                      cellDimension: currentCellDimension,
+                                      baselineFromBottom: baselineFromBottom,
+                                      iconHeight: CTFontGetAscent(normalFont),
+                                      renderingScale: 1)
     }
 
     func mapColor (color: Attribute.Color, isFg: Bool, isBold: Bool, useBrightColors: Bool = true) -> TTColor
     {
+        // Reads terminal.ansiColors below; only reachable from Locked helpers.
+        terminal.terminalLock.preconditionLocked()
         switch color {
         case .defaultColor:
             if isFg {
-                if isBold, !terminal.reverseColors, let boldFg = nativeBoldForegroundColor {
-                    return boldFg
-                }
                 return effectiveNativeForegroundColor
             } else {
                 return effectiveNativeBackgroundColor
@@ -690,7 +2342,7 @@ extension TerminalView {
             if useBrightColors {
                 midx = ansi < 7 ? (Int (ansi) + (isBold ? 8 : 0)) : Int (ansi)
             } else {
-                midx = ansi > 7 ? (Int (ansi) - 8) : Int(ansi)
+                midx = collapseBrightColorsToBase && ansi > 7 ? (Int (ansi) - 8) : Int(ansi)
             }
             if let c = colors [midx] {
                 return c
@@ -717,37 +2369,31 @@ extension TerminalView {
         }
     }
 
-    func nsUnderlineStyle(_ style: UnderlineStyle) -> NSUnderlineStyle {
-        switch style {
-        case .none:
-            return []
-        case .single:
-            return .single
-        case .double:
-            return .double
-        case .curly:
-            return .single
-        case .dotted:
-            return [.single, .patternDot]
-        case .dashed:
-            return [.single, .patternDash]
-        }
-    }
+
 
     // Clears the cached state for colors and triggers a full display
     func colorsChanged ()
     {
+        withTerminal { _ in
+            colorsChangedLocked()
+        }
+    }
+
+    func colorsChangedLocked ()
+    {
         urlAttributes = [:]
         attributes = [:]
-        resetLineInfoCache()
-        clearCGColorCache()
+        terminal.terminalLock.preconditionLocked()
+        // Refresh the mirror while we hold the terminal lock; every
+        // reverseColors change funnels through here via colorChanged.
+        // (terminalLock -> viewStateLock is the sanctioned lock order.)
+        setReverseColorsActive(terminal.reverseColors)
+        coreGraphicsRenderCache.clearColors()
 
 #if os(macOS)
-        if !isUsingMetalRenderer {
-            layer?.backgroundColor = effectiveNativeBackgroundColor.cgColor
-        }
+        updateBackingLayerBackground()
 #else
-        if terminal.reverseColors {
+        if reverseColorsActiveValue() {
             let opacity = layer.backgroundColor?.alpha ?? 1
             if let savedBackground = reverseColorsSavedLayerBackground {
                 reverseColorsSavedLayerBackground = savedBackground.copy(alpha: opacity)
@@ -762,9 +2408,20 @@ extension TerminalView {
 #endif
 
         terminal.updateFullScreen ()
-        queuePendingDisplay()
+        frameDriver.markDirty()
     }
 
+    func colorsChangedOnMain ()
+    {
+        // May be queued from a callback fired during Terminal.init, before
+        // the constructing thread finished assigning `terminal`.
+        guard terminal != nil else { return }
+        withTerminal { _ in
+            colorsChangedLocked()
+        }
+    }
+
+    @MainActor
     func setupTextBlinking() {
         guard textBlinkObservers.isEmpty else { return }
 #if os(macOS)
@@ -772,13 +2429,17 @@ extension TerminalView {
         let appCenter = NotificationCenter.default
         let becameActive = appCenter.addObserver(forName: NSApplication.didBecomeActiveNotification,
                                                   object: nil, queue: .main) { [weak self] _ in
-            self?.textBlinkApplicationActive = true
-            self?.updateTextBlinkLifecycle()
+            MainActor.assumeIsolated {
+                self?.textBlinkApplicationActive = true
+                self?.updateTextBlinkLifecycle()
+            }
         }
         let resignedActive = appCenter.addObserver(forName: NSApplication.willResignActiveNotification,
                                                     object: nil, queue: .main) { [weak self] _ in
-            self?.textBlinkApplicationActive = false
-            self?.updateTextBlinkLifecycle()
+            MainActor.assumeIsolated {
+                self?.textBlinkApplicationActive = false
+                self?.updateTextBlinkLifecycle()
+            }
         }
         textBlinkObservers.append((appCenter, becameActive))
         textBlinkObservers.append((appCenter, resignedActive))
@@ -787,7 +2448,9 @@ extension TerminalView {
         let accessibilityChanged = workspaceCenter.addObserver(
             forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
             object: nil, queue: .main) { [weak self] _ in
-                self?.updateTextBlinkLifecycle()
+                MainActor.assumeIsolated {
+                    self?.updateTextBlinkLifecycle()
+                }
             }
         textBlinkObservers.append((workspaceCenter, accessibilityChanged))
 #else
@@ -795,18 +2458,24 @@ extension TerminalView {
         let center = NotificationCenter.default
         let becameActive = center.addObserver(forName: UIApplication.didBecomeActiveNotification,
                                                object: nil, queue: .main) { [weak self] _ in
-            self?.textBlinkApplicationActive = true
-            self?.updateTextBlinkLifecycle()
+            MainActor.assumeIsolated {
+                self?.textBlinkApplicationActive = true
+                self?.updateTextBlinkLifecycle()
+            }
         }
         let resignedActive = center.addObserver(forName: UIApplication.willResignActiveNotification,
                                                  object: nil, queue: .main) { [weak self] _ in
-            self?.textBlinkApplicationActive = false
-            self?.updateTextBlinkLifecycle()
+            MainActor.assumeIsolated {
+                self?.textBlinkApplicationActive = false
+                self?.updateTextBlinkLifecycle()
+            }
         }
         let motionChanged = center.addObserver(
             forName: UIAccessibility.reduceMotionStatusDidChangeNotification,
             object: nil, queue: .main) { [weak self] _ in
-                self?.updateTextBlinkLifecycle()
+                MainActor.assumeIsolated {
+                    self?.updateTextBlinkLifecycle()
+                }
             }
         textBlinkObservers.append((center, becameActive))
         textBlinkObservers.append((center, resignedActive))
@@ -815,6 +2484,7 @@ extension TerminalView {
         updateTextBlinkLifecycle()
     }
 
+    @MainActor
     func stopTextBlinking() {
         textBlinkTimer?.invalidate()
         textBlinkTimer = nil
@@ -825,6 +2495,7 @@ extension TerminalView {
         textBlinkObservers.removeAll()
     }
 
+    @MainActor
     private var textBlinkMotionReduced: Bool {
 #if os(macOS)
         NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -833,8 +2504,8 @@ extension TerminalView {
 #endif
     }
 
-    func visibleBlinkRows() -> [Int] {
-        guard terminal != nil else { return [] }
+    private func visibleBlinkRowsLocked(_ terminal: Terminal) -> [Int] {
+        terminal.terminalLock.preconditionLocked()
         let buffer = terminal.displayBuffer
         guard !buffer.lines.isEmpty else { return [] }
         let first = max(0, buffer.yDisp)
@@ -843,7 +2514,7 @@ extension TerminalView {
         var result: [Int] = []
         for row in first..<last {
             let line = buffer.lines[row]
-            for column in 0..<buffer.cols where line[column].attribute.style.contains(.blink) {
+            for column in 0..<buffer.cols where line.packedAttribute(at: column).style.contains(.blink) {
                 result.append(row)
                 break
             }
@@ -851,12 +2522,31 @@ extension TerminalView {
         return result
     }
 
-    func updateTextBlinkLifecycle() {
-        guard Thread.isMainThread else {
-            DispatchQueue.main.async { [weak self] in self?.updateTextBlinkLifecycle() }
-            return
+    func visibleBlinkRows() -> [Int] {
+        guard terminal != nil else { return [] }
+        return withTerminal { terminal in
+            visibleBlinkRowsLocked(terminal)
         }
-        let blinkRows = visibleBlinkRows()
+    }
+
+    /// Walks the snapshot for rows carrying blinking text.
+    ///
+    /// Called from frame preparation, which means it can run on the render
+    /// loop. Its result is published to `lastBlinkRows` so the blink timer,
+    /// which runs on main, never has to touch the snapshot itself.
+    /// The blinking rows the last prepared frame found. Safe on any thread.
+    func publishedBlinkRows() -> [Int] {
+        renderOwner.mailbox.currentBlinkRows()
+    }
+
+    @MainActor
+    func updateTextBlinkLifecycle(blinkRows suppliedBlinkRows: [Int]? = nil) {
+        let blinkRows: [Int]
+        if let suppliedBlinkRows {
+            blinkRows = suppliedBlinkRows
+        } else {
+            blinkRows = visibleBlinkRows()
+        }
         let canBlink = window != nil && textBlinkApplicationActive
             && !textBlinkMotionReduced && !blinkRows.isEmpty
         guard canBlink else {
@@ -864,38 +2554,54 @@ extension TerminalView {
             textBlinkTimer = nil
             if !textBlinkVisible {
                 textBlinkVisible = true
-                invalidateTextBlinkRows(blinkRows)
+                if suppliedBlinkRows == nil {
+                    invalidateTextBlinkRows(blinkRows)
+                }
             }
             return
         }
         guard textBlinkTimer == nil else { return }
         textBlinkVisible = true
         let timer = Timer(timeInterval: 0.7, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            self.textBlinkVisible.toggle()
-            self.invalidateTextBlinkRows(self.visibleBlinkRows())
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.textBlinkVisible.toggle()
+                // The published copy, not the snapshot: this fires on main,
+                // and the render loop may be mid-frame inside the snapshot.
+                self.invalidateTextBlinkRows(self.publishedBlinkRows())
+            }
         }
         textBlinkTimer = timer
         RunLoop.main.add(timer, forMode: .common)
     }
 
+    @MainActor
     func setTextBlinkVisibleForTesting(_ visible: Bool) {
         textBlinkTimer?.invalidate()
         textBlinkTimer = nil
         textBlinkVisible = visible
-        invalidateTextBlinkRows(visibleBlinkRows())
+        frameDriver.markDirty()
     }
 
     private func invalidateTextBlinkRows(_ absoluteRows: [Int]) {
-        for row in absoluteRows {
-            invalidateAppearanceRow(row)
-        }
-        queuePendingDisplay()
+        // Blink phase belongs to SnapshotStyle. A viewport-relative row must
+        // not enter the core's live-screen dirty range while scrolled back.
+        guard !absoluteRows.isEmpty else { return }
+        frameDriver.markDirty()
     }
     
-    public func hostCurrentDirectoryUpdated (source: Terminal)
+    public nonisolated func hostCurrentDirectoryUpdated (source: Terminal)
     {
-        terminalDelegate?.hostCurrentDirectoryUpdate(source: self, directory: terminal.hostCurrentDirectory)
+        let directory = source.hostCurrentDirectory
+        onMain { [weak self] in
+            guard let self else { return }
+            self.terminalDelegate?.hostCurrentDirectoryUpdate(source: self, directory: directory)
+        }
+    }
+
+    public nonisolated func hostCurrentDocumentUpdated (source: Terminal)
+    {
+        let _ = source.hostCurrentDocument
     }
 
     
@@ -907,109 +2613,126 @@ extension TerminalView {
     /// if the array does not contain 16 elements, it will not do anything
     public func installColors (_ colors: [Color])
     {
-        terminal.installPalette(colors: colors)
-        self.colors = Array(repeating: nil, count: 256)
-        self.colorsChanged()
+        withTerminal { terminal in
+            terminal.installPalette(colors: colors)
+            self.colors = Array(repeating: nil, count: 256)
+            self.colorsChangedLocked()
+        }
     }
     
-    public func colorChanged (source: Terminal, idx: Int?)
+    public nonisolated func colorChanged (source: Terminal, idx: Int?)
     {
-        if let index = idx {
-            colors [index] = nil
+        // Fires under the terminal lock. Mirror reverseColors synchronously so
+        // draw paths (and callers that assert right after feed returns) see
+        // the DECSCNM flip without waiting for the main-queue hop.
+        setReverseColorsActive(source.reverseColors)
+        let index = idx
+        onMain { [weak self] in
+            guard let self else { return }
+            if let index {
+                self.colors [index] = nil
+            } else {
+                self.colors = Array(repeating: nil, count: 256)
+            }
+            self.colorsChangedOnMain()
+        }
+    }
+
+    public nonisolated func synchronizedOutputChanged (source: Terminal, active: Bool)
+    {
+        // Only deactivation needs a repaint/notification: while the flag is
+        // set the renderers keep showing the last frame on purpose.
+        guard !active else { return }
+        source.terminalLock.preconditionLocked()
+        let displayBuffer = source.displayBuffer
+        let position: Double
+        if source.isDisplayBufferAlternate || displayBuffer.yDisp <= 0 {
+            position = 0
         } else {
-            colors = Array(repeating: nil, count: 256)
+            let maxScrollback = displayBuffer.lines.count - displayBuffer.rows
+            position = displayBuffer.yDisp >= maxScrollback
+                ? 1
+                : Double(displayBuffer.yDisp) / Double(maxScrollback)
         }
-        colorsChanged ()
+        onMain { [weak self] in
+            guard let self else { return }
+            self.updateScroller()
+            self.frameDriver.markDirty()
+            self.terminalDelegate?.scrolled(source: self, position: position)
+        }
     }
 
-    public func synchronizedOutputChanged (source: Terminal, active: Bool)
-    {
-        if !active {
-            updateScroller()
-            queuePendingDisplay()
-            terminalDelegate?.scrolled(source: self, position: scrollPosition)
+    public nonisolated func setBackgroundColor(source: Terminal, color: Color) {
+        let nativeColor = TTColor.make(color: color)
+#if !os(macOS)
+        // Native setters already run on the main thread. Apply their callback
+        // before settingBg is reset, so an RGB-only echo cannot replace .clear.
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                self.setNativeBackgroundColorFromTerminal(nativeColor)
+            }
+            // The callback can hold the terminal lock. Refresh colors later.
+            onMain { [weak self] in
+                self?.colorsChangedOnMain()
+            }
+            return
         }
-    }
-
-    public func setBackgroundColor(source: Terminal, color: Color) {
-        // Can not implement this until I change the color to not be this struct
-        nativeBackgroundColor = TTColor.make (color: color)
-        colorsChanged()
+#endif
+        onMain { [weak self] in
+            guard let self else { return }
+            self.setNativeBackgroundColorFromTerminal(nativeColor)
+            self.colorsChangedOnMain()
+        }
     }
     
-    public func setForegroundColor(source: Terminal, color: Color) {
-        nativeForegroundColor = TTColor.make (color: color)
-        colorsChanged()
+    public nonisolated func setForegroundColor(source: Terminal, color: Color) {
+        let nativeColor = TTColor.make(color: color)
+        onMain { [weak self] in
+            guard let self else { return }
+            self.setNativeForegroundColorFromTerminal(nativeColor)
+            self.colorsChangedOnMain()
+        }
     }
     
     /// Sets the color for the cursor block, and the text when it is under that cursor in block mode
     public func setCursorColor(source: Terminal, color: Color?, textColor: Color?) {
-        if let setColor = color {
-            cursorColorIsDefault = false
-            caretColor = TTColor.make (color: setColor)
-        } else {
-            if let caretView {
-                cursorColorIsDefault = true
+        let nativeColor = color.map { TTColor.make(color: $0) }
+        let nativeTextColor = textColor.map { TTColor.make(color: $0) }
+        onMain { [weak self] in
+            guard let self else { return }
+            if let nativeColor {
+                self.cursorColorIsDefault = false
+                self.caretColor = nativeColor
+            } else if let caretView = self.caretView {
+                self.cursorColorIsDefault = true
                 caretView.caretColor = caretView.defaultCaretColor
             }
-        }
-        if let setColor = textColor {
-            cursorTextColorIsDefault = false
-            caretTextColor = TTColor.make (color: setColor)
-        } else {
-            if let caretView {
-                cursorTextColorIsDefault = true
+            if let nativeTextColor {
+                self.cursorTextColorIsDefault = false
+                self.caretTextColor = nativeTextColor
+            } else if let caretView = self.caretView {
+                self.cursorTextColorIsDefault = true
                 caretView.caretTextColor = caretView.defaultCaretTextColor
             }
-        }
 #if canImport(MetalKit) && os(macOS)
-        queueMetalDisplay()
+            self.frameDriver.markDirty()
 #endif
+        }
     }
-    
-    func getAttributedValue (_ attribute: Attribute, usingFg: TTColor, andBg: TTColor) -> [NSAttributedString.Key:Any]?
+
+    public nonisolated func getColors (source: Terminal) -> (foreground: Color, background: Color)
     {
-        let flags = attribute.style
-        var bg = andBg
-        var fg = usingFg
-        
-        if flags.contains (.inverse) {
-            swap (&bg, &fg)
+        cachedNativeColorsValue() ?? (source.foregroundColor, source.backgroundColor)
+    }
+
+    public nonisolated func notify(source: Terminal, title: String, body: String)
+    {
+        let capturedTitle = title
+        let capturedBody = body
+        onMain {
+            let _ = capturedTitle
+            let _ = capturedBody
         }
-        
-        var tf: TTFont
-        let isBold = flags.contains(.bold)
-        if isBold {
-            if flags.contains (.italic) {
-                tf = fontSet.boldItalic
-            } else {
-                tf = fontSet.bold
-            }
-        } else if flags.contains (.italic) {
-            tf = fontSet.italic
-        } else {
-            tf = fontSet.normal
-        }
-        
-        var nsattr: [NSAttributedString.Key:Any] = [
-            .font: tf,
-            .foregroundColor: fg,
-            .backgroundColor: bg
-        ]
-        if flags.contains (.underline) {
-            let underlineColor = attribute.underlineColor.map {
-                mapColor(color: $0, isFg: true, isBold: flags.contains(.bold), useBrightColors: useBrightColors)
-            } ?? fg
-            let underlineVariant = attribute.underlineStyle == .none ? .single : attribute.underlineStyle
-            nsattr [.underlineColor] = underlineColor
-            nsattr [.underlineStyle] = nsUnderlineStyle(underlineVariant).rawValue
-            nsattr [SwiftTermUnderlineStyleKey] = Int(underlineVariant.rawValue)
-        }
-        if flags.contains (.crossedOut) {
-            nsattr [.strikethroughColor] = fg
-            nsattr [.strikethroughStyle] = NSUnderlineStyle.single.rawValue
-        }
-        return nsattr
     }
     
     //
@@ -1038,7 +2761,7 @@ extension TerminalView {
         
         var useBoldForBrightColor: Bool = false
         // if high - bright colors are disabled in settings we will use bold font instead
-        if case .ansi256(let code) = fg, code > 7, !useBrightColors {
+        if case .ansi256(let code) = fg, code > 7, !useBrightColors, collapseBrightColorsToBase {
             useBoldForBrightColor = true
         }
         var tf: TTFont
@@ -1062,9 +2785,7 @@ extension TerminalView {
         if flags.contains (.dim) {
             fgColor = fgColor.dimmedColor (towards: bgColor)
         }
-        if minimumContrast > 0 {
-            fgColor = adjustedForegroundForMinimumContrast(fgColor, against: bgColor, minimum: minimumContrast)
-        }
+        fgColor = fgColor.withContrast (atLeast: minimumContrastRatio, against: bgColor)
         var nsattr: [NSAttributedString.Key:Any] = [
             .font: tf,
             .foregroundColor: fgColor,
@@ -1086,7 +2807,7 @@ extension TerminalView {
 
         if withUrl {
             nsattr [.underlineStyle] = NSUnderlineStyle.single.rawValue
-            nsattr [.underlineColor] = fgColor
+            nsattr [.underlineColor] = linkUnderlineColor ?? fgColor
             nsattr [SwiftTermUnderlineStyleKey] = Int(UnderlineStyle.dashed.rawValue)
 
             // Add to cache; truecolor attributes are unbounded, so cap it
@@ -1104,9 +2825,13 @@ extension TerminalView {
         return nsattr
     }
 
-    private func kittyImageFromRgba(bytes: [UInt8], width: Int, height: Int) -> TTImage? {
+
+
+
+    nonisolated private func kittyImageFromRgba(bytes: [UInt8], width: Int, height: Int) -> TTImage? {
         let rgbColorSpace = CGColorSpaceCreateDeviceRGB()
-        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+        let bitmapInfo = CGBitmapInfo(rawValue:
+            CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.last.rawValue)
         let data = Data(bytes)
         guard let providerRef = CGDataProvider(data: data as CFData) else {
             return nil
@@ -1127,26 +2852,6 @@ extension TerminalView {
         return TTImage(cgImage: cgimage, size: CGSize(width: width, height: height))
     }
 
-    private func kittyPlaceholderImage(imageId: UInt32, cache: inout [UInt32: TTImage]) -> TTImage? {
-        if let cached = cache[imageId] {
-            return cached
-        }
-        guard let kittyImage = terminal.kittyGraphicsState.imagesById[imageId] else {
-            return nil
-        }
-        let image: TTImage?
-        switch kittyImage.payload {
-        case .png(let data):
-            image = TTImage(data: data)
-        case .rgba(let bytes, let width, let height):
-            image = kittyImageFromRgba(bytes: bytes, width: width, height: height)
-        }
-        if let image {
-            cache[imageId] = image
-        }
-        return image
-    }
-
     private func kittyAspectFitRect(imageSize: CGSize, in rect: CGRect) -> CGRect {
         guard imageSize.width > 0, imageSize.height > 0, rect.width > 0, rect.height > 0 else {
             return rect
@@ -1163,15 +2868,14 @@ extension TerminalView {
     //
     // Helper used by buildAttributedString to construct segments.
     //
-    fileprivate struct ViewLineSegmentBuilder {
+    struct ViewLineSegmentBuilder {
         let column: Int
         let columnWidth: Int
         private var attributedString = NSMutableAttributedString()
         private var characterCount: Int = 0
         private var utf16ToCellOrdinal: [Int] = []
         private var cellCount: Int = 0
-        private var utf16IsCellIdentity = true
-        
+
         init(column: Int, columnWidth: Int) {
             self.column = column
             self.columnWidth = columnWidth
@@ -1183,15 +2887,25 @@ extension TerminalView {
         
         /// Appends a batch of text; `cellUTF16Lengths` holds one entry per
         /// terminal cell in the batch (its text length in UTF-16 units).
-        mutating func append(text: String, attributes: [NSAttributedString.Key: Any],
+        mutating func append(text: String, attributes: SnapshotTextAttributes,
                              cellUTF16Lengths: [Int]) {
-            attributedString.append(NSAttributedString(string: text, attributes: attributes))
+            let location = attributedString.length
+            let length = text.utf16.count
+            let mutableString = attributedString as CFMutableAttributedString
+            CFAttributedStringReplaceString(
+                mutableString,
+                CFRange(location: location, length: 0),
+                text as CFString)
+            if length > 0 {
+                CFAttributedStringSetAttributes(
+                    mutableString,
+                    CFRange(location: location, length: length),
+                    attributes.objectiveC as CFDictionary,
+                    true)
+            }
             characterCount += 1
             for length in cellUTF16Lengths {
                 let units = max(1, length)
-                if units != 1 {
-                    utf16IsCellIdentity = false
-                }
                 for _ in 0..<units {
                     utf16ToCellOrdinal.append(cellCount)
                 }
@@ -1203,286 +2917,51 @@ extension TerminalView {
             guard !isEmpty else {
                 return nil
             }
-            return ViewLineSegment(column: column, columnWidth: columnWidth, characterCount: characterCount, attributedString: attributedString, utf16ToCellOrdinal: utf16ToCellOrdinal, utf16IsCellIdentity: utf16IsCellIdentity)
+            return ViewLineSegment(column: column, columnWidth: columnWidth, characterCount: characterCount, attributedString: attributedString, utf16ToCellOrdinal: utf16ToCellOrdinal)
         }
     }
     
     //
     // Given a line of text with attributes, returns column-aware segments that can be drawn later.
     //
-    func buildAttributedString (row: Int, line: BufferLine, cols: Int) -> ViewLineInfo
+    func buildAttributedStringLocked (row: Int, line: BufferLine, cols: Int) -> ViewLineInfo
     {
-        var segments: [ViewLineSegment] = []
-        let selectionColumns = selectedColumnsRange(row: row, cols: cols)
-        var col = 0
-        var builder: ViewLineSegmentBuilder?
-
-        // The layout uses the complete soft-wrapped paragraph. Pure LTR
-        // paragraphs use the unchanged logical path.
-        let bidiLayout = TerminalBidi.layout(row: row, buffer: terminal.displayBuffer,
-                                             cols: cols, terminal: terminal,
-                                             font: fontSet.normal,
-                                             hostPolicy: bidiHostPolicy)
-        // Rows without RTL content skip the writing-direction override:
-        // CoreText does not reorder pure-LTR text, and omitting the attribute
-        // keeps its bidi resolution machinery out of the common path.
-        let needsDirectionOverride = bidiLayout != nil
-            || TerminalBidi.mayNeedBidi(line: line, cols: cols, terminal: terminal)
-        var visualCol = 0
-        var visualIndex = 0
-        var kittyPlaceholders: [KittyPlaceholderCell] = []
-        var previousPlaceholder: KittyPlaceholderCell?
-        var previousPlaceholderAttribute: Attribute?
-        var blockElements: [BlockElementRenderItem] = []
-        var boxDrawings: [BoxDrawingRenderItem] = []
-        var powerlineGlyphs: [PowerlineRenderItem] = []
-        
-        // Batching state: accumulate consecutive characters with the same attributes
-        var pendingText = ""
-        var pendingCellLengths: [Int] = []
-        var pendingAttrs: [NSAttributedString.Key: Any]? = nil
-        var lastAttr: Attribute? = nil
-        var lastHasUrl = false
-        var lastIsSelected = false
-        var lastBlinkHidden = false
-
-        func flushPending() {
-            if !pendingText.isEmpty, let attrs = pendingAttrs {
-                builder?.append(text: pendingText, attributes: attrs,
-                                cellUTF16Lengths: pendingCellLengths)
-                pendingText = ""
-                pendingCellLengths = []
+        terminal.terminalLock.preconditionLocked()
+        let snapshotRow = TerminalSnapshot.Row(source: line, borrowing: true)
+        snapshotRow.sourceGeneration = line.generation
+        snapshotRow.bidiParagraphRevision = TerminalBidi.layoutRevision(
+            row: row, buffer: terminal.displayBuffer,
+            maximumRows: terminal.options.maximumBidiParagraphRows)
+        snapshotRow.bidiLayout = TerminalBidi.layout(
+            row: row, buffer: terminal.displayBuffer, cols: cols,
+            terminal: terminal, font: fontSet.normal, hostPolicy: bidiHostPolicy)
+        var column = 0
+        while column < min(cols, line.count) {
+            let cell = line.packedView(at: column)
+            if !cell.isSimpleRune {
+                let text = cell.getText()
+                snapshotRow.resolvedCharacters[column] = text.first
+                snapshotRow.resolvedText[column] = text
             }
+            column += max(1, Int(cell.width))
         }
-
-        while true {
-            var displayOverride: Character? = nil
-            if let bidiLayout {
-                guard visualIndex < bidiLayout.visualCells.count else { break }
-                let visualCell = bidiLayout.visualCells[visualIndex]
-                visualIndex += 1
-                col = visualCell.logicalCol
-                displayOverride = visualCell.display
-            } else if col >= cols {
-                break
-            }
-            let ch: CharData = line[col]
-            let width = max(1, Int(ch.width))
-            let attr = ch.attribute
-            let hasUrl = shouldUnderlineLink(row: row, column: col, width: width, cell: ch)
-            guard let attributes = getAttributes(attr, withUrl: hasUrl) else {
-                flushPending()
-                if let finished = builder?.buildIfNeeded() {
-                    segments.append(finished)
-                }
-                builder = nil
-                previousPlaceholder = nil
-                previousPlaceholderAttribute = nil
-                if bidiLayout == nil {
-                    col += width
-                }
-                visualCol += width
-                continue
-            }
-
-            if builder == nil || builder!.columnWidth != width {
-                flushPending()
-                if let finished = builder?.buildIfNeeded() {
-                    segments.append(finished)
-                }
-                builder = ViewLineSegmentBuilder(column: visualCol, columnWidth: width)
-            }
-
-            let isSelected = isColumnSelected(selectionColumns, column: col, width: width)
-            let blinkHidden = !textBlinkVisible && attr.style.contains(.blink)
-
-            // Flush batch when attributes change; the batch dictionary is only
-            // rebuilt at these boundaries, so unchanged cells append without
-            // copying it.
-            if attr != lastAttr || hasUrl != lastHasUrl || isSelected != lastIsSelected
-                || blinkHidden != lastBlinkHidden
-                || pendingAttrs == nil {
-                flushPending()
-                lastAttr = attr
-                lastHasUrl = hasUrl
-                lastIsSelected = isSelected
-                lastBlinkHidden = blinkHidden
-                var batchAttributes = attributes
-                if isSelected {
-                    batchAttributes[.selectionBackgroundColor] = selectedTextBackgroundColor
-                    batchAttributes[.foregroundColor] = selectedTextForegroundColor
-                    if batchAttributes[.underlineColor] != nil {
-                        batchAttributes[.underlineColor] = selectedTextForegroundColor
-                    }
-                    if batchAttributes[.strikethroughColor] != nil {
-                        batchAttributes[.strikethroughColor] = selectedTextForegroundColor
-                    }
-                }
-                if blinkHidden {
-                    batchAttributes[.foregroundColor] = TTColor.clear
-                    batchAttributes.removeValue(forKey: .underlineColor)
-                    batchAttributes.removeValue(forKey: .underlineStyle)
-                    batchAttributes.removeValue(forKey: .strikethroughColor)
-                    batchAttributes.removeValue(forKey: .strikethroughStyle)
-                    batchAttributes.removeValue(forKey: SwiftTermUnderlineStyleKey)
-                }
-                if needsDirectionOverride {
-                    // SwiftTerm owns cell placement. A BiDi layout is already in
-                    // visual order, and rows with RTL content on the legacy and
-                    // explicit-LTR paths must keep logical cell order. The LTR
-                    // override stops CoreText from applying a second,
-                    // renderer-specific ordering pass.
-                    batchAttributes[ltrWritingDirectionKey] = ltrWritingDirectionValue
-                }
-                pendingAttrs = batchAttributes
-            }
-            let currentAttributes = pendingAttrs!
-
-            let character: Character = displayOverride ?? (ch.code == 0 ? " " : terminal.getCharacter(for: ch))
-            let renderCodePoint = character.unicodeScalars.count == 1
-                ? character.unicodeScalars.first!.value : UInt32(ch.code)
-
-            // Render Powerline separators independently of the font so their
-            // joining edge shares the background's exact pixel boundary.
-            if !blinkHidden && PowerlineRenderer.shouldRender(codePoint: renderCodePoint,
-                                              customGlyphsEnabled: customBlockGlyphs) {
-                flushPending()
-                let fgColor = (currentAttributes[.foregroundColor] as? TTColor) ?? effectiveNativeForegroundColor
-                powerlineGlyphs.append(PowerlineRenderItem(column: visualCol,
-                                                           columnWidth: width,
-                                                           codePoint: renderCodePoint,
-                                                           foregroundColor: fgColor))
-                builder?.append(text: " ", attributes: currentAttributes,
-                                cellUTF16Lengths: [1])
-                previousPlaceholder = nil
-                previousPlaceholderAttribute = nil
-            // Renders box drawing characters independently of the font
-            // U+2500...U+257F
-            } else if !blinkHidden, customBlockGlyphs,
-               renderCodePoint >= UInt32(BoxDrawingRenderer.lowerBoundary),
-               renderCodePoint <= UInt32(BoxDrawingRenderer.upperBoundary) {
-                flushPending()
-                let fgColor = (currentAttributes[.foregroundColor] as? TTColor) ?? effectiveNativeForegroundColor
-                boxDrawings.append(BoxDrawingRenderItem(column: visualCol,
-                                                        columnWidth: width,
-                                                        codePoint: renderCodePoint,
-                                                        foregroundColor: fgColor))
-                builder?.append(text: " ", attributes: currentAttributes, cellUTF16Lengths: [1])
-                previousPlaceholder = nil
-                previousPlaceholderAttribute = nil
-            // Renders block elements independently of the font
-            // U+2580...U+259F
-            } else if !blinkHidden, customBlockGlyphs,
-                      (renderCodePoint >= UInt32(BlockElementMapping.lowerBoundary)
-                       && renderCodePoint <= UInt32(BlockElementMapping.upperBoundary)),
-                      let rects = BlockElementMapping.rects(for: renderCodePoint) {
-                flushPending()
-                let fgColor = (currentAttributes[.foregroundColor] as? TTColor) ?? effectiveNativeForegroundColor
-                blockElements.append(BlockElementRenderItem(column: visualCol,
-                                                            columnWidth: width,
-                                                            codePoint: renderCodePoint,
-                                                            rects: rects,
-                                                            foregroundColor: fgColor))
-                builder?.append(text: " ", attributes: currentAttributes, cellUTF16Lengths: [1])
-                previousPlaceholder = nil
-                previousPlaceholderAttribute = nil
-            } else if let placeholder = KittyPlaceholderDecoder.decode(character: character,
-                                                                       attribute: attr,
-                                                                       row: row,
-                                                                       col: visualCol,
-                                                                       previous: previousPlaceholder,
-                                                                       previousAttribute: previousPlaceholderAttribute) {
-                flushPending()
-                kittyPlaceholders.append(placeholder)
-                builder?.append(text: " ", attributes: currentAttributes, cellUTF16Lengths: [1])
-                previousPlaceholder = placeholder
-                previousPlaceholderAttribute = attr
-            } else if !blinkHidden && bidiLayout != nil && TerminalBidi.needsCellIsolation(character) {
-                // In BiDi rows, Arabic-script cells and cells holding combining
-                // sequences or emoji are isolated into their own column-anchored
-                // segment so that font-side ligation or extra mark glyphs cannot
-                // shift the columns of the cells that follow them.
-                flushPending()
-                if let finished = builder?.buildIfNeeded() {
-                    segments.append(finished)
-                }
-                builder = ViewLineSegmentBuilder(column: visualCol, columnWidth: width)
-                // Resolve the fallback font here, once per (font, character):
-                // otherwise every one of these single-cell CTLines re-runs the
-                // font cascade to discover the same Arabic-capable font.
-                var isolatedAttributes = currentAttributes
-                let baseFont = (currentAttributes[.font] as? TTFont) ?? fontSet.normal
-                isolatedAttributes[.font] = resolvedFont(for: character, base: baseFont)
-                builder?.append(text: String(character), attributes: isolatedAttributes,
-                                cellUTF16Lengths: [character.utf16.count])
-                if let finished = builder?.buildIfNeeded() {
-                    segments.append(finished)
-                }
-                builder = nil
-                previousPlaceholder = nil
-                previousPlaceholderAttribute = nil
-            } else {
-                // Common path: just accumulate into the batch
-                let renderedCharacter: Character = blinkHidden ? " " : character
-                pendingText.append(renderedCharacter)
-                var cellUTF16Length = renderedCharacter.utf16.count
-                if !blinkHidden && UnicodeUtil.prefersTextPresentation(renderedCharacter) {
-                    // Steer font fallback away from Apple Color Emoji for
-                    // default-text-presentation symbols (see prefersTextPresentation).
-                    pendingText.append("\u{FE0E}")
-                    cellUTF16Length += 1
-                }
-                pendingCellLengths.append(cellUTF16Length)
-                previousPlaceholder = nil
-                previousPlaceholderAttribute = nil
-            }
-
-            if bidiLayout == nil {
-                col += width
-            }
-            visualCol += width
-        }
-        flushPending()
-        
-        if let finished = builder?.buildIfNeeded() {
-            segments.append(finished)
-        }
-        
-        return ViewLineInfo(segments: segments,
-                            images: line.images,
-                            kittyPlaceholders: kittyPlaceholders,
-                            blockElements: blockElements,
-                            boxDrawings: boxDrawings,
-                            powerlineGlyphs: powerlineGlyphs)
+        let liveStyle = SnapshotStyle(
+            selectionActive: selection?.active == true,
+            selectionStart: selection?.start ?? Position(col: 0, row: 0),
+            selectionEnd: selection?.end ?? Position(col: 0, row: 0),
+            selectionIsBlock: selection?.isBlock == true,
+            linkHighlightRange: linkHighlightRange,
+            linkHighlightMode: linkHighlightMode,
+            commandActive: commandActive,
+            textBlinkVisible: textBlinkVisible)
+        let context = SnapshotRenderContext(viewState: FrameViewState(view: self),
+                                            style: liveStyle,
+                                            ansiColors: terminal.ansiColors, cols: cols)
+        var result = textBuilder.buildAttributedString(row: snapshotRow, absoluteRow: row,
+                                                       context: context)
+        result.images = line.images
+        return result
     }
-
-    func shouldUnderlineLink(row: Int, column: Int, width: Int, cell: CharData) -> Bool
-    {
-        switch linkHighlightMode {
-        case .always:
-            return cell.hasPayload
-        case .alwaysWithModifier:
-            return commandActive && cell.hasPayload
-        case .hover:
-            guard let highlights = linkHighlightRange,
-                  let highlight = highlights.first(where: { $0.row == row })
-            else {
-                return false
-            }
-            let cellRange = column..<(column + width)
-            return highlight.range.overlaps(cellRange)
-        case .hoverWithModifier:
-            guard commandActive,
-                  let highlights = linkHighlightRange,
-                  let highlight = highlights.first(where: { $0.row == row })
-            else {
-                return false
-            }
-            let cellRange = column..<(column + width)
-            return highlight.range.overlaps(cellRange)
-        }
-    }
-
     // The payload contains terminal data expected to be in the form:
     // "k=v:k2=v2;URL"
     func urlAndParamsFrom(payload: String) -> (String, [String:String])?
@@ -1504,6 +2983,15 @@ extension TerminalView {
 
     func payloadString(at position: Position) -> String?
     {
+        withTerminal { _ in
+            payloadStringLocked(at: position)
+        }
+    }
+
+    func payloadStringLocked(at position: Position) -> String?
+    {
+        terminal.terminalLock.preconditionLocked()
+        guard terminal.enableOsc8Hyperlinks else { return nil }
         let buffer = terminal.displayBuffer
         guard position.row >= 0 && position.row < buffer.lines.count else {
             return nil
@@ -1511,12 +2999,12 @@ extension TerminalView {
         let line = buffer.lines[position.row]
         let maxCol = max(0, min(terminal.cols - 1, line.count - 1))
         let col = max(0, min(position.col, maxCol))
-        let cell = line[col]
+        let cell = line.packedView(at: col)
         if let payload = cell.getPayload() as? String {
             return payload
         }
-        if cell.code == 0 && col > 0 && line[col - 1].width == 2 {
-            let base = line[col - 1]
+        if cell.code == 0 && col > 0 && line.packedWidth(at: col - 1) == 2 {
+            let base = line.packedView(at: col - 1)
             if let payload = base.getPayload() as? String {
                 return payload
             }
@@ -1529,39 +3017,29 @@ extension TerminalView {
         let oldRows = Set(oldRange?.map(\.row) ?? [])
         let newRows = Set(newRange?.map(\.row) ?? [])
         for row in oldRows.union(newRows) {
-            invalidateAppearanceRow(row)
+            invalidateLinkHighlightRow(row)
         }
     }
 
-    // Attribute-only changes (links and blink phase) must invalidate both the
-    // cached row rendition and the actual viewport row, even in scrollback.
-    func invalidateAppearanceRow(_ bufferRow: Int)
+    func invalidateLinkHighlightRow(_ bufferRow: Int)
     {
+        withTerminal { _ in
+            invalidateLinkHighlightRowLocked(bufferRow)
+        }
+    }
+
+    func invalidateLinkHighlightRowLocked(_ bufferRow: Int)
+    {
+        terminal.terminalLock.preconditionLocked()
         let displayBuffer = terminal.displayBuffer
-        invalidateLineInfoCache(row: bufferRow)
         let screenRow = bufferRow - displayBuffer.yDisp
         guard screenRow >= 0 && screenRow < terminal.rows else {
             return
         }
-        #if os(macOS)
-        var usesMetal = false
-        #if canImport(MetalKit)
-        usesMetal = metalView != nil
-        #endif
-        if !usesMetal {
-            // updateRange records rows in live-screen space, but screenRow is
-            // a viewport row; while scrolled back the two spaces disagree, so
-            // routing this mark through the update range would repaint the
-            // wrong row (or nothing). Invalidate the viewport row directly,
-            // extended one cell downward so underline/descender pixels below
-            // the strict row box are cleared too.
-            let rowBottom = frame.height - (CGFloat(screenRow) + 1) * cellDimension.height
-            setNeedsDisplay(CGRect(x: 0, y: max(0, rowBottom - cellDimension.height),
-                                   width: frame.width, height: cellDimension.height * 2))
-            return
-        }
-        #endif
-        terminal.updateRange(borrowing: displayBuffer, screenRow)
+        // The highlight itself is copied in SnapshotStyle on the frame tick.
+        // Scheduling that frame preserves the coordinate space: core damage
+        // is relative to yBase, while this highlight is relative to yDisp.
+        frameSignal.markDirty()
     }
 
     func linkVisibleForClick(match: Terminal.LinkMatch, hasCommandModifier: Bool) -> Bool
@@ -1596,8 +3074,16 @@ extension TerminalView {
         }
     }
 
-    func linkForClick(at position: Position, hasCommandModifier: Bool) -> (link: String, params: [String:String])?
+    func linkForClick(at position: Position, hasCommandModifier: Bool) -> (link: String, params: [String:String], isExplicit: Bool)?
     {
+        withTerminal { _ in
+            linkForClickLocked(at: position, hasCommandModifier: hasCommandModifier)
+        }
+    }
+
+    func linkForClickLocked(at position: Position, hasCommandModifier: Bool) -> (link: String, params: [String:String], isExplicit: Bool)?
+    {
+        terminal.terminalLock.preconditionLocked()
         let mode: Terminal.LinkLookupMode = implicitLinkCouldBeVisible(hasCommandModifier: hasCommandModifier)
             ? .explicitAndImplicit
             : .explicitOnly
@@ -1608,89 +3094,25 @@ extension TerminalView {
             return nil
         }
         if match.isExplicit,
-           let payload = payloadString(at: position),
+           let payload = payloadStringLocked(at: position),
            let (url, params) = urlAndParamsFrom(payload: payload) {
-            return (url, params)
+            return (url, params, true)
         }
-        return (match.text, [:])
+        return (match.text, [:], match.isExplicit)
     }
     
     /// Returns the selection range for the specified row, if any.
     func selectedColumnsRange(row: Int, cols: Int) -> Range<Int>? {
+        terminal.terminalLock.preconditionLocked()
         guard let selection = self.selection, selection.active else {
             return nil
         }
-
-        let startRow = selection.start.row
-        let endRow = selection.end.row
-        let startCol = selection.start.col
-        let endCol = selection.end.col
-
-        var selectionRange: NSRange = .empty
-
-        // single row
-        if endRow == startRow && startRow == row {
-            if startCol < endCol {
-                let extra = endCol == terminal.cols-1 ? 1 : 0
-                selectionRange = NSRange(location: startCol, length: endCol - startCol + extra)
-            } else if startCol > endCol {
-                selectionRange = NSRange(location: endCol, length: startCol - endCol)
-            }
-        } else if endRow > startRow {
-            // first row
-            if startRow == row && endRow > row {
-                selectionRange = NSRange(location: startCol, length: cols - startCol)
-            }
-
-            // in between
-            if startRow < row && endRow > row {
-                selectionRange = NSRange(location: 0, length: cols)
-            }
-
-            // last row
-            if startRow < row && endRow == row {
-                let extra = endCol == terminal.cols-1 ? 1 : 0
-                selectionRange = NSRange(location: 0, length: endCol + extra)
-            }
-        } else if endRow < startRow {
-            // first row
-            if endRow == row && startRow > row {
-                selectionRange = NSRange(location: endCol, length: cols - endCol)
-            }
-
-            // in between
-            if startRow > row && endRow < row {
-                selectionRange = NSRange(location: 0, length: cols)
-            }
-
-            // last row
-            if endRow < row && startRow == row {
-                let extra = startCol == terminal.cols-1 ? 1 : 0
-                selectionRange = NSRange(location: 0, length: startCol + extra)
-            }
-        }
-
-        if selectionRange == .empty || selectionRange.length == 0 {
-            return nil
-        }
-
-        let lowerBound = max(0, min(selectionRange.location, cols))
-        let upperBound = max(lowerBound, min(cols, selectionRange.location + selectionRange.length))
-        if lowerBound == upperBound {
-            return nil
-        }
-        return lowerBound..<upperBound
+        return selection.selectedColumnsRange(row: row, cols: cols)
     }
     
-    func isColumnSelected(_ selectionRange: Range<Int>?, column: Int, width: Int) -> Bool {
-        guard let selectionRange else {
-            return false
-        }
-        let endColumn = column + width
-        return selectionRange.lowerBound < endColumn && column < selectionRange.upperBound
-    }
 
-    func drawRunAttributes(_ attributes: [NSAttributedString.Key : Any], glyphPositions positions: [CGPoint], in currentContext: CGContext) {
+    /// Draws underline and strikethrough: one `cellWidth` stroke per position.
+    func drawRunAttributes(_ attributes: [NSAttributedString.Key : Any], glyphPositions positions: [CGPoint], cellWidth: CGFloat, in currentContext: CGContext) {
         currentContext.saveGState()
 
         let scale = backingScaleFactor()
@@ -1761,11 +3183,11 @@ extension TerminalView {
             let underlineStyle = resolveUnderlineStyle(attributes)
 
             currentContext.setShouldAntialias(false)
-            currentContext.setStrokeColor(cachedCGColor(underlineColor))
+            currentContext.setStrokeColor(coreGraphicsRenderCache.cgColor(for: underlineColor))
 
             for p in positions {
                 let start = p.applying(.init(translationX: 0, y: underlinePosition))
-                let end = p.applying(.init(translationX: ceil(cellDimension.width), y: underlinePosition))
+                let end = p.applying(.init(translationX: cellWidth, y: underlinePosition))
                 switch underlineStyle {
                 case .none:
                     break
@@ -1773,7 +3195,7 @@ extension TerminalView {
                     strokePatternedLine(from: start, to: end, thickness: underlineThickness, style: .single)
                     let offset = underlineThickness + 1
                     let start2 = p.applying(.init(translationX: 0, y: underlinePosition - offset))
-                    let end2 = p.applying(.init(translationX: ceil(cellDimension.width), y: underlinePosition - offset))
+                    let end2 = p.applying(.init(translationX: cellWidth, y: underlinePosition - offset))
                     strokePatternedLine(from: start2, to: end2, thickness: underlineThickness, style: .single)
                 case .curly:
                     strokeWavyLine(from: start, to: end, thickness: underlineThickness)
@@ -1792,12 +3214,12 @@ extension TerminalView {
             let strikePosition = (CTFontGetXHeight(ctFont) + strikeThickness) * 0.5
 
             currentContext.setShouldAntialias(false)
-            currentContext.setStrokeColor(cachedCGColor(strikeColor))
+            currentContext.setStrokeColor(coreGraphicsRenderCache.cgColor(for: strikeColor))
 
             for p in positions {
                 let path = TTBezierPath()
                 path.move(to: p.applying(.init(translationX: 0, y: strikePosition)))
-                path.addLine(to: p.applying(.init(translationX: ceil(cellDimension.width), y: strikePosition)))
+                path.addLine(to: p.applying(.init(translationX: cellWidth, y: strikePosition)))
                 path.lineWidth = strikeThickness
 
                 if strikeStyle.contains(.patternDash) {
@@ -1810,7 +3232,7 @@ extension TerminalView {
                     let path2 = TTBezierPath()
                     let offset = strikeThickness + 1
                     path2.move(to: p.applying(.init(translationX: 0, y: strikePosition - offset)))
-                    path2.addLine(to: p.applying(.init(translationX: ceil(cellDimension.width), y: strikePosition - offset)))
+                    path2.addLine(to: p.applying(.init(translationX: cellWidth, y: strikePosition - offset)))
                     path2.lineWidth = strikeThickness
                     if strikeStyle.contains(.patternDash) {
                         let pattern: [CGFloat] = [2.0]
@@ -1929,6 +3351,9 @@ extension TerminalView {
         case .doubledDown, .doubledTop: scaleY = scale * 2
         case .single, .doubleWidth: scaleY = scale
         }
+        let minThicknessPx = max(1, Int(round(scale)))
+        let lineWidthPx = max(minThicknessPx,
+                              Int(round(scale * fontSet.underlineThickness() * 1.35)))
         for item in items {
             let cellRect = CGRect(x: lineOrigin.x + CGFloat(item.column) * cellDimension.width,
                                   y: lineOrigin.y,
@@ -1939,7 +3364,8 @@ extension TerminalView {
                                    cellRect: cellRect,
                                    scaleX: scaleX,
                                    scaleY: scaleY,
-                                   color: item.foregroundColor.cgColor)
+                                   color: item.foregroundColor.cgColor,
+                                   lineWidthPx: lineWidthPx * (renderMode == .doubledDown || renderMode == .doubledTop ? 2 : 1))
         }
     }
 
@@ -1947,13 +3373,30 @@ extension TerminalView {
     // TODO: this should not render any lines outside the dirtyRect
     func drawTerminalContents (dirtyRect: TTRect, context: CGContext, bufferOffset: Int)
     {
-        let lineDescent = CTFontGetDescent(fontSet.normal)
-        let lineLeading = CTFontGetLeading(fontSet.normal)
-        let yOffset = ceil(lineDescent+lineLeading)
-        let displayBuffer = terminal.displayBuffer
+        // The Core Graphics draw: glyph shaping and painting from the snapshot,
+        // with no terminal lock held. The Metal path has its own Metal.Draw
+        // signpost. Without this interval a main-thread stall cannot be
+        // attributed, because the frame tick and the lock are both far too
+        // short to explain the stalls the baselines show.
+        let drawInterval = Profiling.begin(.frameDraw)
+        defer { drawInterval.end() }
+        diagnosticsState.withLock { $0.renders += 1 }
+
+        guard let viewState = captureFrameViewState() else { return }
+        let kittyCellWidth = cellDimension.width
+        let kittyCellHeight = cellDimension.height
+        let kittyImageScale = getImageScale()
+        renderOwner.withSnapshotForDrawing(viewState: viewState) { snapshot, renderContext in
+        let yOffset = renderContext.baselineOffset
+        #if os(macOS)
+        let renderBufferOffset = snapshot.yDisp
+        #else
+        let renderBufferOffset = bufferOffset
+        #endif
+        let frameCellHeight = cellDimension.height
 
         func calcLineOffset (forRow: Int) -> CGFloat {
-            cellDimension.height * CGFloat (forRow-bufferOffset+1)
+            frameCellHeight * CGFloat (forRow-renderBufferOffset+1)
         }
         // draw lines
         #if os(iOS) || os(visionOS)
@@ -1970,30 +3413,105 @@ extension TerminalView {
         // On Mac, we are drawing the terminal buffer
         let cellHeight = cellDimension.height
         let boundsMaxY = bounds.maxY
-        let firstRow = displayBuffer.yDisp+Int ((boundsMaxY-dirtyRect.maxY)/cellHeight)
-        let lastRow = displayBuffer.yDisp+Int((boundsMaxY-dirtyRect.minY)/cellHeight)
+        let firstRow = snapshot.yDisp+Int ((boundsMaxY-dirtyRect.maxY)/cellHeight)
+        let lastRow = snapshot.yDisp+Int((boundsMaxY-dirtyRect.minY)/cellHeight)
         #endif
 
-        if displayBuffer.lines.count == 0 {
-            lineInfoCache.removeAll()
+        let kittyRenderSnapshot = snapshot.kitty.renderSnapshot
+        // Most frames carry no image at all. Everything below - the grouping
+        // dictionary, the live-key set, and the three per-row placement passes -
+        // produces nothing in that case, so it is all behind this one test.
+        let hasKittyPlacements = !kittyRenderSnapshot.placements.isEmpty
+        let virtualPlacementsByImageId: [UInt32: [KittyGraphicsRenderPlacement]]
+        if hasKittyPlacements {
+            virtualPlacementsByImageId = Dictionary(
+                grouping: kittyRenderSnapshot.placements.filter(\.isVirtual),
+                by: \.imageId)
+
+            // Drop the crops that this snapshot can no longer use - a removed
+            // placement, a new animation frame, a new visible source rectangle -
+            // and keep the rest for the placements this pass does not repaint.
+            var liveKittyImageKeys = Set<KittyPlacementImageKey>()
+            liveKittyImageKeys.reserveCapacity(kittyRenderSnapshot.placements.count)
+            for placement in kittyRenderSnapshot.placements {
+                guard let image = kittyRenderSnapshot.imagesById[placement.imageId] else { continue }
+                liveKittyImageKeys.insert(KittyPlacementImageKey(
+                    token: placement.token,
+                    contentGeneration: image.contentGeneration,
+                    source: placement.visibleSource))
+            }
+            kittyPlacementImageCache.withLock { cache in
+                if cache.contains(where: { !liveKittyImageKeys.contains($0.key) }) {
+                    cache = cache.filter { liveKittyImageKeys.contains($0.key) }
+                }
+            }
         } else {
-            let firstVisibleCacheRow = max(0, firstRow)
-            let lastVisibleCacheRow = min(displayBuffer.lines.count - 1, lastRow)
-            if firstVisibleCacheRow <= lastVisibleCacheRow {
-                pruneLineInfoCache(to: firstVisibleCacheRow...lastVisibleCacheRow)
-            } else {
-                lineInfoCache.removeAll()
+            virtualPlacementsByImageId = [:]
+            // No placement survives, so no crop can be reused. The sweep still
+            // has to run once to release the last frame's crops.
+            kittyPlacementImageCache.withLock { cache in
+                if !cache.isEmpty {
+                    cache.removeAll()
+                }
             }
         }
 
-        let isAltBuffer = terminal.isCurrentBufferAlternate
-        var virtualPlacementsByImageId: [UInt32: [KittyPlacementRecord]] = [:]
-        if !terminal.kittyGraphicsState.placementsByKey.isEmpty {
-            for record in terminal.kittyGraphicsState.placementsByKey.values where record.isVirtual && record.isAlternateBuffer == isAltBuffer {
-                virtualPlacementsByImageId[record.imageId, default: []].append(record)
+        func kittyRenderImage(_ placement: KittyGraphicsRenderPlacement) -> TTImage? {
+            guard let image = kittyRenderSnapshot.imagesById[placement.imageId] else {
+                return nil
+            }
+            let source = placement.visibleSource
+            let key = KittyPlacementImageKey(
+                token: placement.token,
+                contentGeneration: image.contentGeneration,
+                source: source)
+            if let cached = kittyPlacementImageCache.withLock({ $0[key] }) { return cached }
+            var rgba = [UInt8]()
+            rgba.reserveCapacity(source.width * source.height * 4)
+            for row in source.y..<(source.y + source.height) {
+                let start = (row * image.width + source.x) * 4
+                let end = start + source.width * 4
+                rgba.append(contentsOf: image.rgba[start..<end])
+            }
+            guard let decoded = kittyImageFromRgba(
+                bytes: rgba, width: source.width, height: source.height) else { return nil }
+            kittyPlacementImageCache.withLock { $0[key] = decoded }
+            return decoded
+        }
+
+        func drawKittyPlacements(
+            onScreenRow screenRow: Int,
+            lineOrigin: CGPoint,
+            layer: KittyGraphicsRenderLayer
+        ) {
+            let offsetScale = kittyImageScale
+            let lineRect = CGRect(
+                x: 0, y: lineOrigin.y,
+                width: CGFloat(snapshot.cols) * kittyCellWidth,
+                height: kittyCellHeight)
+            for placement in kittyRenderSnapshot.placements where !placement.isVirtual {
+                guard KittyGraphicsRenderLayer(zIndex: placement.zIndex) == layer else {
+                    continue
+                }
+                let geometry = placement.geometry
+                guard screenRow >= geometry.row,
+                      screenRow < geometry.row + geometry.rows,
+                      let image = kittyRenderImage(placement) else { continue }
+                let offsetX = CGFloat(placement.pixelOffsetX) / offsetScale
+                let offsetY = CGFloat(placement.pixelOffsetY) / offsetScale
+                let rowsBelow = geometry.row + geometry.rows - 1 - screenRow
+                let rect = CGRect(
+                    x: CGFloat(geometry.column) * kittyCellWidth + offsetX,
+                    y: lineOrigin.y - CGFloat(rowsBelow) * kittyCellHeight + offsetY,
+                    width: max(0, CGFloat(geometry.columns) * kittyCellWidth - offsetX),
+                    height: max(0, CGFloat(geometry.rows) * kittyCellHeight - offsetY))
+                guard rect.width > 0, rect.height > 0 else { continue }
+                context.saveGState()
+                context.clip(to: lineRect)
+                image.draw(in: rect)
+                context.restoreGState()
             }
         }
-        var placeholderImageCache: [UInt32: TTImage] = [:]
 
         #if os(macOS)
         // Clear the invalidated region before painting. We fill only cells that carry
@@ -2003,16 +3521,23 @@ extension TerminalView {
         // scroll region, line insert/delete) otherwise keeps stale glyphs/backgrounds.
         // Clear to transparent — not fill — so a translucent background is preserved.
         context.clear(dirtyRect)
+        if renderContext.translucentCellBackgroundAlpha != nil {
+            // Translucent cell backgrounds: the layer stays clear (see
+            // updateBackingLayerBackground) and the default background is
+            // painted here, so the explicit fills below can replace it.
+            context.setFillColor(coreGraphicsRenderCache.cgColor(for: renderContext.effectiveBackgroundColor))
+            context.fill(dirtyRect)
+        }
         #endif
 
         for row in firstRow...lastRow {
             if row < 0 {
                 continue
             }
-            if row >= displayBuffer.lines.count {
+            guard let snapshotRow = snapshot.row(atAbsolute: row) else {
                 continue
             }
-            let renderMode = displayBuffer.lines [row].renderMode
+            let renderMode = snapshotRow.line.renderMode
             let lineOffset = calcLineOffset(forRow: row)
             let lineOrigin = CGPoint(x: 0, y: frame.height - lineOffset)
 
@@ -2065,108 +3590,90 @@ extension TerminalView {
                 continue
             } 
             #endif
-            let line = displayBuffer.lines [row]
-            let lineInfo = cachedLineInfo(row: row, line: line, cols: displayBuffer.cols)
+            let lineInfo = textBuilder.buildAttributedString(row: snapshotRow, absoluteRow: row,
+                                                             context: renderContext)
             let rowBase = lineOrigin.y + cellDimension.height
-            var underTextImages: [AppleImage] = []
-            var overTextKittyImages: [AppleImage] = []
-            var otherImages: [AppleImage] = []
+            var otherImages: [SnapshotImage] = []
             if let images = lineInfo.images {
                 for basicImage in images {
-                    guard let image = basicImage as? AppleImage else {
+                    guard let image = basicImage as? SnapshotImage else {
                         continue
                     }
-                    if image.kittyIsKitty {
-                        if image.kittyZIndex < 0 {
-                            underTextImages.append(image)
-                        } else {
-                            overTextKittyImages.append(image)
-                        }
-                    } else {
-                        otherImages.append(image)
-                    }
+                    otherImages.append(image)
                 }
-                let sortKitty: (AppleImage, AppleImage) -> Bool = { lhs, rhs in
-                    if lhs.kittyZIndex != rhs.kittyZIndex {
-                        return lhs.kittyZIndex < rhs.kittyZIndex
-                    }
-                    let leftId = lhs.kittyImageId ?? 0
-                    let rightId = rhs.kittyImageId ?? 0
-                    return leftId < rightId
-                }
-                underTextImages.sort(by: sortKitty)
-                overTextKittyImages.sort(by: sortKitty)
             }
 
             // Pre-create CTLines and runs once per row to avoid duplicate
             // creation, and extract the attribute values both draw passes need
             // once per run: bridging the whole attribute dictionary per pass is
             // far more expensive than these keyed lookups.
+            let runAttributeKeys = coreGraphicsRenderCache.runAttributeKeys
             let preparedSegments: [(segment: ViewLineSegment, ctLine: CTLine, runs: [PreparedRun])] =
                 lineInfo.segments.compactMap { segment in
                     guard segment.attributedString.length > 0 else { return nil }
-                    let ctLine = cachedCTLine(segment.attributedString)
+                    let ctLine = coreGraphicsRenderCache.line(for: segment.attributedString)
                     guard let ctRuns = CTLineGetGlyphRuns(ctLine) as? [CTRun] else { return nil }
                     let runs = ctRuns.map { run -> PreparedRun in
                         // Toll-free cast: no per-entry bridging.
                         let attrs = CTRunGetAttributes(run) as NSDictionary
-                        let selectionBackground = attrs.object(forKey: selectionBackgroundKeyNS) as? TTColor
+                        let selectionBackground = attrs.object(
+                            forKey: runAttributeKeys.selectionBackground) as? TTColor
                         return PreparedRun(
                             run: run,
-                            font: attrs.object(forKey: fontKeyNS) as? TTFont,
-                            foregroundColor: attrs.object(forKey: foregroundKeyNS) as? TTColor,
+                            font: attrs.object(forKey: runAttributeKeys.font) as? TTFont,
+                            foregroundColor: attrs.object(
+                                forKey: runAttributeKeys.foreground) as? TTColor,
                             backgroundColor: selectionBackground
-                                ?? attrs.object(forKey: backgroundKeyNS) as? TTColor,
-                            hasDecorations: attrs.object(forKey: underlineStyleKeyNS) != nil
-                                || attrs.object(forKey: strikethroughStyleKeyNS) != nil,
+                                ?? attrs.object(
+                                    forKey: runAttributeKeys.background) as? TTColor,
+                            hasExplicitBackground: selectionBackground != nil
+                                || attrs.object(
+                                    forKey: runAttributeKeys.explicitBackground) != nil,
+                            glyphPolicy: attrs.object(
+                                forKey: runAttributeKeys.glyphPolicy)
+                                as? TerminalGlyphPlacementPolicy,
+                            hasDecorations: attrs.object(
+                                forKey: runAttributeKeys.underlineStyle) != nil
+                                || attrs.object(
+                                    forKey: runAttributeKeys.strikethroughStyle) != nil,
+                            sourceCells: segment.cellOrdinals(in: CTRunGetStringRange(run)),
                             attributes: attrs)
                     }
                     return (segment, ctLine, runs)
                 }
+
+            if hasKittyPlacements {
+                drawKittyPlacements(
+                    onScreenRow: row - snapshot.yDisp,
+                    lineOrigin: lineOrigin,
+                    layer: .belowBackground)
+            }
 
             // Background fill loop — uses cached CTLines
             context.saveGState()
             context.setShouldAntialias(false)
             context.setLineCap(.square)
             context.setLineWidth(0)
+            if renderContext.translucentCellBackgroundAlpha != nil {
+                // Translucent cell backgrounds replace the default background
+                // painted above instead of compositing over it, so a cell ends
+                // at the alpha it carries. Selection fills arrive already
+                // composited over the default background.
+                context.setBlendMode(.copy)
+            }
 
             for prepared in preparedSegments {
-                var processedGlyphs = 0
                 for preparedRun in prepared.runs {
-                    let run = preparedRun.run
-                    let runGlyphsCount = CTRunGetGlyphCount(run)
-                    if runGlyphsCount == 0 {
-                        continue
-                    }
-                    let startColumn: Int
-                    let endColumn: Int
-                    if prepared.segment.utf16IsCellIdentity {
-                        // One UTF-16 unit per cell: glyph index arithmetic
-                        // yields the column span directly.
-                        startColumn = prepared.segment.column + (processedGlyphs * prepared.segment.columnWidth)
-                        endColumn = startColumn + (runGlyphsCount * prepared.segment.columnWidth)
-                    } else {
-                        // Span the columns of the cells this run's characters came
-                        // from: combining marks add glyphs but not columns.
-                        var runIndices = [CFIndex](repeating: 0, count: runGlyphsCount)
-                        CTRunGetStringIndices(run, CFRange(), &runIndices)
-                        var minOrdinal = Int.max
-                        var maxOrdinal = Int.min
-                        for index in runIndices {
-                            let ordinal = prepared.segment.cellOrdinal(forUTF16: index)
-                            minOrdinal = min(minOrdinal, ordinal)
-                            maxOrdinal = max(maxOrdinal, ordinal)
-                        }
-                        startColumn = prepared.segment.column + (minOrdinal * prepared.segment.columnWidth)
-                        endColumn = prepared.segment.column + ((maxOrdinal + 1) * prepared.segment.columnWidth)
-                    }
-                    processedGlyphs += runGlyphsCount
-
                     // Runs carrying the default background are not filled: the
                     // view's layer background already paints that color, and
                     // filling it again would double-composite when the
                     // background is translucent (backgroundOpacity < 1)
-                    if let backgroundColor = preparedRun.backgroundColor, backgroundColor != effectiveNativeBackgroundColor {
+                    if preparedRun.hasExplicitBackground,
+                       let backgroundColor = preparedRun.backgroundColor {
+                        let startColumn = prepared.segment.column
+                            + preparedRun.sourceCells.lowerBound * prepared.segment.columnWidth
+                        let endColumn = prepared.segment.column
+                            + preparedRun.sourceCells.upperBound * prepared.segment.columnWidth
                         let columnSpan = max(0, endColumn - startColumn)
                         if columnSpan > 0 {
                             var rect = CGRect(
@@ -2176,7 +3683,7 @@ extension TerminalView {
                                 height: cellDimension.height)
 
                             #if (lastLineExtends)
-                            if (row-displayBuffer.yDisp) >= displayBuffer.rows - 1 {
+                            if (row-snapshot.yDisp) >= snapshot.rowCount - 1 {
                                 let missing = frame.height - (cellDimension.height + CGFloat(row) + 1)
                                 rect.size.height += missing
                                 rect.origin.y -= missing
@@ -2186,7 +3693,7 @@ extension TerminalView {
                             // The right margin beyond the last column needs no
                             // fill: the layer background paints it
 
-                            context.setFillColor(cachedCGColor(backgroundColor))
+                            context.setFillColor(coreGraphicsRenderCache.cgColor(for: backgroundColor))
                             context.fill(rect)
                         }
                     }
@@ -2195,18 +3702,11 @@ extension TerminalView {
 
             context.restoreGState()
 
-            if !underTextImages.isEmpty {
-                let offsetScale = getImageScale()
-                for image in underTextImages {
-                    let col = image.col
-                    let offsetX = CGFloat(image.kittyPixelOffsetX) / offsetScale
-                    let offsetY = CGFloat(image.kittyPixelOffsetY) / offsetScale
-                    let rect = CGRect(x: CGFloat (col)*cellDimension.width + offsetX,
-                                      y: rowBase - CGFloat (image.pixelHeight) + offsetY,
-                                      width: CGFloat (image.pixelWidth),
-                                      height: CGFloat (image.pixelHeight))
-                    image.image.draw (in: rect)
-                }
+            if hasKittyPlacements {
+                drawKittyPlacements(
+                    onScreenRow: row - snapshot.yDisp,
+                    lineOrigin: lineOrigin,
+                    layer: .belowText)
             }
 
             if !lineInfo.boxDrawings.isEmpty {
@@ -2233,7 +3733,6 @@ extension TerminalView {
 
             // Glyph drawing loop — reuses cached CTLines
             for prepared in preparedSegments {
-                var processedGlyphs = 0
                 for preparedRun in prepared.runs {
                     let run = preparedRun.run
                     let runGlyphsCount = CTRunGetGlyphCount(run)
@@ -2250,93 +3749,142 @@ extension TerminalView {
                     var coreTextPositions = [CGPoint](repeating: .zero, count: runGlyphsCount)
                     CTRunGetPositions(run, CFRange(), &coreTextPositions)
 
-                    var positions = [CGPoint](repeating: .zero, count: runGlyphsCount)
-                    if prepared.segment.utf16IsCellIdentity {
-                        // One UTF-16 unit per cell: glyph index arithmetic
-                        // yields each glyph's column directly.
-                        let startColumn = prepared.segment.column + (processedGlyphs * prepared.segment.columnWidth)
-                        for i in 0..<runGlyphsCount {
-                            let glyphColumn = startColumn + (i * prepared.segment.columnWidth)
-                            positions[i] = CGPoint(
-                                x: lineOrigin.x + CGFloat(glyphColumn) * cellDimension.width,
-                                y: lineOrigin.y + yOffset + coreTextPositions[i].y)
-                        }
-                    } else {
-                        var runIndices = [CFIndex](repeating: 0, count: runGlyphsCount)
-                        CTRunGetStringIndices(run, CFRange(), &runIndices)
-
-                        // Position each glyph at its source cell's column; glyphs
-                        // sharing a cell (base + combining marks) keep their
-                        // CoreText offsets relative to the cluster's first glyph,
-                        // so marks overlay the base instead of shifting columns.
-                        // Same-cell glyphs are adjacent in glyph order, so a pair
-                        // of locals replaces a per-run anchor dictionary.
-                        var anchorOrdinal = -1
-                        var anchorX: CGFloat = 0
-                        for i in 0..<runGlyphsCount {
-                            let ctPosition = coreTextPositions[i]
-                            let ordinal = prepared.segment.cellOrdinal(forUTF16: runIndices[i])
-                            let intraCluster: CGFloat
-                            if ordinal == anchorOrdinal {
-                                intraCluster = ctPosition.x - anchorX
-                            } else {
-                                anchorOrdinal = ordinal
-                                anchorX = ctPosition.x
-                                intraCluster = 0
-                            }
-                            let glyphColumn = prepared.segment.column + (ordinal * prepared.segment.columnWidth)
-                            positions[i] = CGPoint(
-                                x: lineOrigin.x + CGFloat(glyphColumn) * cellDimension.width + intraCluster,
-                                y: lineOrigin.y + yOffset + ctPosition.y)
-                        }
+                    // Glyphs are mapped to cells through their source UTF-16
+                    // index, not their glyph index: a ligature covers several
+                    // cells with one glyph, and combining marks put several
+                    // glyphs in one cell. CoreText exposes the indices without
+                    // a copy for plain runs; shaped runs need the copy.
+                    let indicesPtr = CTRunGetStringIndicesPtr(run)
+                    var copiedIndices: [CFIndex] = []
+                    if indicesPtr == nil {
+                        copiedIndices = [CFIndex](repeating: 0, count: runGlyphsCount)
+                        CTRunGetStringIndices(run, CFRange(), &copiedIndices)
                     }
-                    processedGlyphs += runGlyphsCount
+                    func cellOrdinal(ofGlyph i: Int) -> Int {
+                        prepared.segment.cellOrdinal(forUTF16: indicesPtr?[i] ?? copiedIndices[i])
+                    }
 
+                    var positions = [CGPoint](repeating: .zero, count: runGlyphsCount)
+                    // Position each glyph at its source cell's column; glyphs
+                    // sharing a cell (base + combining marks) keep their
+                    // CoreText offsets relative to the cluster's first glyph,
+                    // so marks overlay the base instead of shifting columns.
+                    // Same-cell glyphs are adjacent in glyph order, so a pair
+                    // of locals replaces a per-run anchor dictionary.
+                    var anchorOrdinal = -1
+                    var anchorX: CGFloat = 0
+                    for i in 0..<runGlyphsCount {
+                        let ctPosition = coreTextPositions[i]
+                        let ordinal = cellOrdinal(ofGlyph: i)
+                        let intraCluster: CGFloat
+                        if ordinal == anchorOrdinal {
+                            intraCluster = ctPosition.x - anchorX
+                        } else {
+                            anchorOrdinal = ordinal
+                            anchorX = ctPosition.x
+                            intraCluster = 0
+                        }
+                        let glyphColumn = prepared.segment.column + (ordinal * prepared.segment.columnWidth)
+                        positions[i] = CGPoint(
+                            x: lineOrigin.x + CGFloat(glyphColumn) * cellDimension.width + intraCluster,
+                            y: lineOrigin.y + yOffset + ctPosition.y)
+                    }
                     context.setFillColor(
-                        cachedCGColor(preparedRun.foregroundColor ?? effectiveNativeForegroundColor))
+                        coreGraphicsRenderCache.cgColor(
+                            for: preparedRun.foregroundColor ?? renderContext.effectiveForegroundColor))
 
                     // Center full-width (CJK) and substituted glyphs within their
                     // multi-cell slot instead of pinning them to the cell's left
-                    // edge. `positions` stays grid-aligned for the decorations
-                    // below; only `glyphPositions` is shifted/scaled.
+                    // edge. `positions` stays grid-aligned; only
+                    // `glyphPositions` is shifted/scaled.
                     let ctRunFont = runFont as CTFont
                     var glyphPositions = positions
                     var scaledFits: [GlyphSlotFit]? = nil
-                    if prepared.segment.columnWidth >= 2 {
+                    let glyphPolicy = preparedRun.glyphPolicy
+                    // Single-cell glyphs are only fitted when CoreText took
+                    // them from a fallback font, so primary-font text keeps
+                    // the fast path.
+                    let fitsFallbackGlyphs = glyphPolicy == nil
+                        && prepared.segment.columnWidth == 1
+                        && !isPrimaryFont(ctRunFont)
+                    if glyphPolicy != nil || prepared.segment.columnWidth >= 2 || fitsFallbackGlyphs {
                         var computed = [GlyphSlotFit](repeating: .identity, count: runGlyphsCount)
                         var anyScaled = false
                         for i in 0..<runGlyphsCount {
-                            let fit = glyphSlotFit(font: ctRunFont, glyph: runGlyphs[i], columnWidth: prepared.segment.columnWidth)
+                            let fit: GlyphSlotFit
+                            if let glyphPolicy {
+                                fit = glyphSlotFit(font: ctRunFont, glyph: runGlyphs[i],
+                                                   columnWidth: prepared.segment.columnWidth,
+                                                   policy: glyphPolicy)
+                            } else if fitsFallbackGlyphs {
+                                // Only a glyph that is alone in exactly one
+                                // cell: combining marks stay on their base,
+                                // and a conjunct keeps its multi-cell span.
+                                let ordinal = cellOrdinal(ofGlyph: i)
+                                let isAlone = (i == 0 || cellOrdinal(ofGlyph: i - 1) != ordinal)
+                                    && (i + 1 < runGlyphsCount ? cellOrdinal(ofGlyph: i + 1)
+                                                               : preparedRun.sourceCells.upperBound) == ordinal + 1
+                                fit = isAlone ? fallbackGlyphFit(font: ctRunFont, glyph: runGlyphs[i]) : .identity
+                            } else {
+                                fit = glyphSlotFit(font: ctRunFont, glyph: runGlyphs[i], columnWidth: prepared.segment.columnWidth)
+                            }
                             computed[i] = fit
                             glyphPositions[i].x += fit.dx
                             glyphPositions[i].y += fit.dy
-                            if fit.scale != 1 { anyScaled = true }
+                            if fit.scaleX != 1 || fit.scaleY != 1 { anyScaled = true }
                         }
                         if anyScaled { scaledFits = computed }
                     }
 
+                    // Slot fitting and fractional view heights can place an
+                    // otherwise cell-aligned glyph between device pixels.
+                    // Rasterize at an integral origin, matching the Metal atlas.
+                    for i in glyphPositions.indices {
+                        glyphPositions[i] = CellGeometry.pixelAlignedGlyphOrigin(glyphPositions[i], in: context)
+                    }
+
                     if let scaledFits {
-                        // Rare path: at least one glyph overflowed its slot and is
-                        // drawn individually at a reduced point size.
+                        // Rare path: at least one glyph is scaled and is drawn
+                        // individually — uniform scales via a resized font,
+                        // per-axis (stretch policy) scales via the CTM.
                         for i in 0..<runGlyphsCount {
-                            let s = scaledFits[i].scale
-                            let drawFont: CTFont = s == 1
-                                ? ctRunFont
-                                : CTFontCreateCopyWithAttributes(ctRunFont, CTFontGetSize(ctRunFont) * s, nil, nil)
+                            let fit = scaledFits[i]
                             var g = runGlyphs[i]
                             var p = glyphPositions[i]
-                            CTFontDrawGlyphs(drawFont, &g, &p, 1, context)
+                            if fit.isUniform {
+                                let s = fit.scale
+                                let drawFont: CTFont = s == 1
+                                    ? ctRunFont
+                                    : CTFontCreateCopyWithAttributes(ctRunFont, CTFontGetSize(ctRunFont) * s, nil, nil)
+                                CTFontDrawGlyphs(drawFont, &g, &p, 1, context)
+                            } else {
+                                context.saveGState()
+                                context.translateBy(x: p.x, y: p.y)
+                                context.scaleBy(x: fit.scaleX, y: fit.scaleY)
+                                var origin = CGPoint.zero
+                                CTFontDrawGlyphs(ctRunFont, &g, &origin, 1, context)
+                                context.restoreGState()
+                            }
                         }
                     } else {
                         CTFontDrawGlyphs(runFont, runGlyphs, &glyphPositions, glyphPositions.count, context)
                     }
 
-                    // Draw other attributes (decorations stay grid-aligned).
+                    // Draw other attributes, once per source cell (a ligature
+                    // covers several cells, a wide cell several columns).
                     // The dictionary is only bridged for the rare decorated
                     // runs; undecorated runs skip the call entirely.
                     if preparedRun.hasDecorations {
                         let runAttributes = preparedRun.attributes as? [NSAttributedString.Key: Any] ?? [:]
-                        drawRunAttributes(runAttributes, glyphPositions: positions, in: context)
+                        let baselineY = lineOrigin.y + yOffset + coreTextPositions[0].y
+                        let decorationPositions = preparedRun.sourceCells.map { ordinal in
+                            CGPoint(x: lineOrigin.x + CGFloat(prepared.segment.column + ordinal * prepared.segment.columnWidth) * cellDimension.width,
+                                    y: baselineY)
+                        }
+                        drawRunAttributes(runAttributes,
+                                          glyphPositions: decorationPositions,
+                                          cellWidth: ceil(CGFloat(prepared.segment.columnWidth) * cellDimension.width),
+                                          in: context)
                     }
                 }
             }
@@ -2350,14 +3898,14 @@ extension TerminalView {
                         if placeholder.placementId != 0 && record.placementId != placeholder.placementId {
                             return false
                         }
-                        return record.cols > placeholder.placeholderCol &&
-                            record.rows > placeholder.placeholderRow &&
-                            record.cols > 0 &&
-                            record.rows > 0
+                        return record.geometry.columns > placeholder.placeholderCol &&
+                            record.geometry.rows > placeholder.placeholderRow &&
+                            record.geometry.columns > 0 &&
+                            record.geometry.rows > 0
                     }) else {
                         continue
                     }
-                    guard let image = kittyPlaceholderImage(imageId: placeholder.imageId, cache: &placeholderImageCache) else {
+                    guard let image = kittyRenderImage(record) else {
                         continue
                     }
 
@@ -2366,11 +3914,11 @@ extension TerminalView {
                     let offsetY = CGFloat(record.pixelOffsetY) / offsetScale
                     let placementOriginX = lineOrigin.x + CGFloat(placeholder.col - placeholder.placeholderCol) * cellDimension.width + offsetX
                     let placementTopY = lineOrigin.y + CGFloat(placeholder.placeholderRow) * cellDimension.height
-                    let placementOriginY = placementTopY - CGFloat(record.rows - 1) * cellDimension.height + offsetY
+                    let placementOriginY = placementTopY - CGFloat(record.geometry.rows - 1) * cellDimension.height + offsetY
                     let placementRect = CGRect(x: placementOriginX,
                                                y: placementOriginY,
-                                               width: CGFloat(record.cols) * cellDimension.width,
-                                               height: CGFloat(record.rows) * cellDimension.height)
+                                               width: CGFloat(record.geometry.columns) * cellDimension.width,
+                                               height: CGFloat(record.geometry.rows) * cellDimension.height)
                     if placementRect.width <= 0 || placementRect.height <= 0 {
                         continue
                     }
@@ -2386,18 +3934,11 @@ extension TerminalView {
                 }
             }
 
-            if !overTextKittyImages.isEmpty {
-                let offsetScale = getImageScale()
-                for image in overTextKittyImages {
-                    let col = image.col
-                    let offsetX = CGFloat(image.kittyPixelOffsetX) / offsetScale
-                    let offsetY = CGFloat(image.kittyPixelOffsetY) / offsetScale
-                    let rect = CGRect(x: CGFloat (col)*cellDimension.width + offsetX,
-                                      y: rowBase - CGFloat (image.pixelHeight) + offsetY,
-                                      width: CGFloat (image.pixelWidth),
-                                      height: CGFloat (image.pixelHeight))
-                    image.image.draw (in: rect)
-                }
+            if hasKittyPlacements {
+                drawKittyPlacements(
+                    onScreenRow: row - snapshot.yDisp,
+                    lineOrigin: lineOrigin,
+                    layer: .aboveText)
             }
             if !otherImages.isEmpty {
                 for image in otherImages {
@@ -2422,10 +3963,13 @@ extension TerminalView {
         }
         
 #if os(macOS)
-        // Fills gaps at the end with the default terminal background
+        // Fills gaps at the end with the default terminal background. A
+        // translucent background is already there: the layer paints it (or,
+        // with translucent cell backgrounds, the fill at the top of this
+        // draw), and filling it again would composite it twice.
         let box = CGRect (x: 0, y: 0, width: bounds.width, height: bounds.height.truncatingRemainder(dividingBy: cellHeight))
-        if dirtyRect.intersects(box) {
-            effectiveNativeBackgroundColor.setFill()
+        if dirtyRect.intersects(box) && renderContext.effectiveBackgroundColor.cgColor.alpha >= 1 {
+            renderContext.effectiveBackgroundColor.setFill()
             context.fill ([box])
         }
 #elseif false
@@ -2437,15 +3981,16 @@ extension TerminalView {
 
         let inter = dirtyRect.intersection(CGRect (x: 0, y: lineOrigin.y, width: bounds.width, height: cellHeight))
         if !inter.isEmpty {
-            effectiveNativeBackgroundColor.setFill()
+            renderContext.effectiveBackgroundColor.setFill()
             context.fill ([inter])
         }
 #endif
         
 #if os(iOS) || os(visionOS)
-        if selection.active {
+        if snapshot.style.selectionActive {
             let start, end: Position
 
+            @MainActor
             func drawSelectionHandle (drawStart: Bool, row: Int) {
                 let lineOffset = calcLineOffset(forRow: row)
                 let lineOrigin = frame.height - lineOffset
@@ -2475,8 +4020,8 @@ extension TerminalView {
             }
             
             // Normalize the selection start/end, regardless of where it started
-            let sstart = selection.start
-            let send = selection.end
+            let sstart = snapshot.style.selectionStart
+            let send = snapshot.style.selectionEnd
             if Position.compare (sstart, send) == .before {
                 start = sstart
                 end = send
@@ -2489,358 +4034,509 @@ extension TerminalView {
             drawSelectionHandle (drawStart: false, row: end.row)
         }
 #endif
+        }
     }
     
-    /// Update visible area
-    func updateDisplay (notifyAccessibility: Bool)
-    {
-        defer { pendingDisplay = false }
-        if terminal.synchronizedOutputActive {
-            return
-        }
-        updateCursorPosition()
-        guard let (rowStart, rowEnd) = terminal.getUpdateRange () else {
-            if notifyUpdateChanges {
-                let buffer = terminal.displayBuffer
-                let y = buffer.yDisp+buffer.y
-                terminalDelegate?.rangeChanged (source: self, startY: y, endY: y)
-            }
-            // Pure cursor moves (e.g. CSI C / CSI D from word-jumps) don't
-            // mark any row dirty, so getUpdateRange() returns nil. With Metal
-            // the cursor is drawn by the renderer reading buffer.x/y at draw
-            // time, and MTKView is paused — without an explicit redraw the
-            // cursor stays at its old screen position until something else
-            // dirties a row. Trigger a redraw if the cursor moved.
-            #if canImport(MetalKit)
-            if metalView != nil {
-                let buffer = terminal.displayBuffer
-                let cursor = (x: buffer.x, y: buffer.yBase + buffer.y, hidden: terminal.cursorHidden)
-                if lastRenderedCursor == nil || lastRenderedCursor! != cursor {
-                    noteMetalCursorActivityIfNeeded(cursor)
-                    requestMetalDisplay()
-                }
-            }
-            #endif
-            return
-        }
-        if notifyUpdateChanges {
-            terminalDelegate?.rangeChanged (source: self, startY: rowStart, endY: rowEnd)
-        }
-
-        terminal.clearUpdateRange ()
-
-        #if os(macOS)
-        let displayBuffer = terminal.displayBuffer
-        var redrawStart = rowStart
-        var redrawEnd = rowEnd
-        var absoluteDependencyRange: ClosedRange<Int>?
-        if !displayBuffer.lines.isEmpty,
-           rowStart >= 0, rowEnd >= rowStart, rowEnd < terminal.rows {
-            let maxRow = displayBuffer.lines.count - 1
-            let absoluteStart = max(0, min(displayBuffer.yDisp + rowStart, maxRow))
-            let absoluteEnd = max(absoluteStart,
-                                  min(displayBuffer.yDisp + rowEnd, maxRow))
-            let dependencies = TerminalBidi.renderingDependencyRange(
-                rows: absoluteStart...absoluteEnd,
-                buffer: displayBuffer,
-                maximumRows: terminal.options.maximumBidiParagraphRows)
-            absoluteDependencyRange = dependencies
-            redrawStart = max(0, dependencies.lowerBound - displayBuffer.yDisp)
-            redrawEnd = min(terminal.rows - 1,
-                            dependencies.upperBound - displayBuffer.yDisp)
-        }
-        let baseLine = frame.height
+    /// What one prepared frame implies for the main thread.
+    ///
+    /// `PreparedFrame` stays in the render owner. Only its checked-Sendable
+    /// `mainEffects` value crosses to the main actor. The cursor can therefore
+    /// keep the framework values that the renderer needs.
+    struct PreparedFrame {
+        var mainEffects: MainFrameEffects
         var region: CGRect?
-        // `rowStart`/`rowEnd` come from the terminal's update range, which is recorded
-        // in `buffer.y` space (relative to `yBase`, the live screen). The pinned rect
-        // below maps them to the screen as if row `y` were screen row `y`, but
-        // drawTerminalContents maps screen rects back to buffer rows via `yDisp`.
-        // Those two agree only while the viewport is pinned to the bottom. Once the
-        // user scrolls back, scrolledBackInvalidationRegion decides between a
-        // full-frame repaint and skipping invalidation entirely when the change
-        // provably lies below the visible rows.
-        if displayBuffer.yDisp != displayBuffer.yBase {
-            region = scrolledBackInvalidationRegion(buffer: displayBuffer,
-                                                    rowStart: rowStart, rowEnd: rowEnd)
-        } else {
-            noteRepaintTrackingState(buffer: displayBuffer)
-            var pinned = CGRect (x: 0,
-                             y: baseLine - (cellDimension.height + CGFloat(redrawEnd) * cellDimension.height),
-                             width: frame.width,
-                             height: CGFloat(redrawEnd-redrawStart + 1) * cellDimension.height)
+        var needsMetalDisplay: Bool
+        var cursor: SnapshotCursor?
+        /// Snapshot row count at prepare time, so placing the caret
+        /// needs no second look at the snapshot.
+        var cursorRowCount: Int
 
-            // If we are the last line, we should also queue a refresh for the "remaining" bits at the
-            // end which can be redrawn by large unicode
-            if redrawEnd == terminal.rows - 1 {
-                let oh = pinned.height
-                let oy = pinned.origin.y
-                pinned = CGRect (x: 0, y: 0, width: frame.width, height: oh + oy)
-            } else {
-                // Region ends mid-screen (a restricted DECSTBM region): extend the
-                // invalidation down by one cell so the sub-cell remainder just below the
-                // band's bottom row (descenders / tall unicode) is cleared too. Previously
-                // only rowEnd == rows-1 got this, leaving a one-row ghost below the region.
-                let extra = cellDimension.height
-                let newY = max (0, pinned.origin.y - extra)
-                pinned = CGRect (x: 0, y: newY, width: frame.width, height: pinned.maxY - newY)
-            }
-            region = pinned
+        init (region: CGRect?, rangeChanged: (start: Int, end: Int)?,
+              notifyAccessibility: Bool, needsMetalDisplay: Bool,
+              cursor: SnapshotCursor?, cursorRowCount: Int,
+              scrollPosition: Double) {
+            mainEffects = MainFrameEffects(
+                rangeChanged: rangeChanged.map {
+                    FrameChangedRange(start: $0.start, end: $0.end)
+                },
+                notifyAccessibility: notifyAccessibility,
+                scrollPosition: scrollPosition)
+            self.region = region
+            self.needsMetalDisplay = needsMetalDisplay
+            self.cursor = cursor
+            self.cursorRowCount = cursorRowCount
         }
-#if canImport(MetalKit)
-        if metalView != nil {
-            let buffer = terminal.displayBuffer
-            let dirtyRange: ClosedRange<Int>?
-            if buffer.lines.count == 0 {
-                dirtyRange = nil
-            } else if let absoluteDependencyRange {
-                dirtyRange = absoluteDependencyRange
-            } else {
-                let maxRow = buffer.lines.count - 1
-                let visibleStart = buffer.yDisp
-                let visibleEnd = min(maxRow, buffer.yDisp + buffer.rows - 1)
-                if rowStart >= 0 && rowEnd >= rowStart && rowEnd < terminal.rows {
-                    let absStart = buffer.yDisp + rowStart
-                    let absEnd = buffer.yDisp + rowEnd
-                    let clampedStart = max(0, min(absStart, maxRow))
-                    let clampedEnd = max(0, min(absEnd, maxRow))
-                    if clampedStart <= clampedEnd {
-                        dirtyRange = clampedStart...clampedEnd
-                    } else if visibleStart <= visibleEnd {
-                        dirtyRange = visibleStart...visibleEnd
-                    } else {
-                        dirtyRange = nil
-                    }
-                } else if visibleStart <= visibleEnd {
-                    dirtyRange = visibleStart...visibleEnd
-                } else {
-                    dirtyRange = nil
+
+        var blinkRows: [Int] {
+            get { mainEffects.blinkRows }
+            set { mainEffects.blinkRows = newValue }
+        }
+        var resizedTo: (cols: Int, rows: Int)? {
+            get {
+                mainEffects.resizedTo.map { (cols: $0.cols, rows: $0.rows) }
+            }
+            set {
+                mainEffects.resizedTo = newValue.map {
+                    FrameTerminalSize(cols: $0.cols, rows: $0.rows)
                 }
             }
-            setMetalDirtyRange(dirtyRange)
-            noteMetalCursorActivityIfNeeded((x: buffer.x, y: buffer.yBase + buffer.y, hidden: terminal.cursorHidden))
-            requestMetalDisplay()
-        } else if let region {
-            setNeedsDisplay(region)
         }
-#else
-        if let region {
-            setNeedsDisplay(region)
+#if os(macOS)
+        var scroller: ScrollerState? {
+            get { mainEffects.scroller }
+            set { mainEffects.scroller = newValue }
         }
 #endif
-        #else
-        // TODO iOS: need to update the code above, but will do that when I get some real
-        // life data being fed into it.
-        #if canImport(MetalKit)
-        if metalView != nil {
-            setMetalDirtyRange(metalVisibleRange())
-            let buffer = terminal.displayBuffer
-            noteMetalCursorActivityIfNeeded((x: buffer.x, y: buffer.yBase + buffer.y, hidden: terminal.cursorHidden))
-            requestMetalDisplay()
-        } else {
-            setNeedsDisplay(bounds)
-        }
-        #else
-        setNeedsDisplay(bounds)
-        #endif
-        #endif
+    }
 
-        updateDebugDisplay ()
-        
-        if (notifyAccessibility) {
-            accessibility.invalidate ()
-            #if os(iOS)
+    /// Refreshes the terminal snapshot and submits one frame.
+    ///
+    /// Always runs on the main thread. When a render loop is active this does
+    /// almost nothing: it captures the view state and hands the frame over
+    /// (io-gaps.md G1, WO-F4).
+    func frameTick ()
+    {
+        let tick = Profiling.begin(.frameTick)
+        defer { tick.end() }
+        guard let viewState = captureFrameViewState() else { return }
+#if os(macOS) && canImport(MetalKit)
+        if usesRenderLoop {
+            publishFrameViewState(viewState)
+            renderLoop?.signal()
+            return
+        }
+#endif
+        guard let prepared = prepareFrame(viewState: viewState) else { return }
+        applyFrameSideEffects(prepared.mainEffects)
+        updateCursorPosition(from: prepared.cursor, rowCount: prepared.cursorRowCount)
+        submitFrameDraw(prepared)
+    }
+
+    /// Captures what this frame needs from the view. Main thread only — this is
+    /// the boundary the rest of the frame path is not allowed to cross.
+    @MainActor
+    func captureFrameViewState () -> FrameViewState?
+    {
+        guard terminal != nil else { return nil }
+#if os(macOS)
+        if urlPreview != nil && !enableOsc8Hyperlinks {
+            removePreviewUrl()
+        }
+#endif
+        return FrameViewState(view: self)
+    }
+
+    /// Hands the capture to the render loop.
+    ///
+    /// Republished every tick rather than invalidated whenever a font, color or
+    /// selection changes: capturing costs microseconds and there is no list of
+    /// setters to keep in step, which is the failure mode a cache invalidation
+    /// scheme would have.
+    func publishFrameViewState (_ viewState: FrameViewState)
+    {
+        renderOwner.mailbox.publish(viewState)
+    }
+
+    /// Refreshes the snapshot under the terminal lock and works out what the
+    /// frame implies.
+    ///
+    /// Reads only `viewState` and the terminal, so it is safe to call off the
+    /// main thread (io-gaps.md G1, WO-F2/WO-F4). Anything that needs AppKit or
+    /// UIKit belongs in `applyFrameSideEffects` instead.
+    func prepareFrame (viewState: FrameViewState) -> PreparedFrame?
+    {
+        renderOwner.prepareFrame(viewState: viewState)
+    }
+
+    /// The AppKit/UIKit half of a frame: what `prepareFrame` deliberately left
+    /// undone because it touches the view. Main thread only.
+    func applyFrameSideEffects (_ effects: MainFrameEffects)
+    {
+        if let resized = effects.resizedTo {
+            // The delegate call is what reaches the pty ioctl, so it runs once
+            // per frame now rather than once per drag step.
+            accessibility.invalidate()
+            terminalDelegate?.sizeChanged(source: self, newCols: resized.cols,
+                                          newRows: resized.rows)
+            updateScroller()
+        }
+#if os(macOS)
+        if let scroller = effects.scroller {
+            applyScrollerState(scroller)
+        }
+#endif
+        updateTextBlinkLifecycle(blinkRows: effects.blinkRows)
+
+        if let changed = effects.rangeChanged {
+            terminalDelegate?.rangeChanged(source: self, startY: changed.start,
+                                           endY: changed.end)
+        }
+
+        if effects.notifyAccessibility {
+            accessibility.invalidate()
+#if os(iOS)
             UIAccessibility.post(notification: .layoutChanged, argument: nil)
-            #endif
-            #if os(macOS)
-            NSAccessibility.post (element: self, notification: .valueChanged)
-            NSAccessibility.post (element: self, notification: .selectedTextChanged)
-            #endif
+#endif
+#if os(macOS)
+            NSAccessibility.post(element: self, notification: .valueChanged)
+#endif
         }
-    }
-    
-    #if os(macOS)
-    /// Records the tick-to-tick comparison state for the CG scrolled-back
-    /// repaint skip. Called on every region pass — pinned and scrolled — so a
-    /// buffer switch or generation bump consumed while pinned is not
-    /// mistaken for "unchanged" on the next scrolled-back tick.
-    func noteRepaintTrackingState(buffer: Buffer) {
-        lastRepaintDisplayedAlt = terminal.isDisplayBufferAlternate
-        lastRepaintFullRefreshGeneration = terminal.fullRefreshGeneration
-        lastRepaintScrollbackAnchor = buffer.linesTop + buffer.yDisp
+#if os(macOS)
+        // On a change to the selection, not on each frame of output:
+        // VoiceOver reads the whole selection each time it hears this.
+        if effects.selection != accessibilitySelection {
+            accessibilitySelection = effects.selection
+            NSAccessibility.post(element: self, notification: .selectedTextChanged)
+        }
+#endif
+
+        if consumeScrolledDirty() {
+            updateScroller()
+            terminalDelegate?.scrolled(source: self, position: effects.scrollPosition)
+        }
+        updateDebugDisplay()
     }
 
-    /// Decides what the CG renderer should invalidate for a display tick while
-    /// the viewport is scrolled back (`yDisp != yBase`). Returns the full frame
-    /// when anything that can change visible pixels happened, or nil (skip
-    /// invalidation entirely) when the update provably lies below the viewport.
-    /// The contract and its adversarial review live in
-    /// `docs/agent_memory/handoffs/` and `ScrollbackRepaintTests`.
-    func scrolledBackInvalidationRegion(buffer: Buffer, rowStart: Int, rowEnd: Int) -> CGRect? {
-        let fullFrame = CGRect(x: 0, y: 0, width: frame.width, height: frame.height)
-
-        let displayedAlt = terminal.isDisplayBufferAlternate
-        let generation = terminal.fullRefreshGeneration
-        // All-time identity of the line at the viewport top: recycle at
-        // capacity does linesTop += 1 / yDisp -= 1 (stable while the content
-        // under the viewport is stable), the compensation clamps at yDisp == 0
-        // (sum changes exactly when content slides), and prepending does
-        // linesTop -= n / yDisp += n (stable, content unchanged).
-        let anchor = buffer.linesTop + buffer.yDisp
-        let changed = lastRepaintDisplayedAlt != displayedAlt
-            || lastRepaintFullRefreshGeneration != generation
-            || lastRepaintScrollbackAnchor != anchor
-        noteRepaintTrackingState(buffer: buffer)
-        if changed {
-            return fullFrame
+    /// Hands the prepared frame to whichever renderer is active.
+    func submitFrameDraw (_ prepared: PreparedFrame)
+    {
+#if canImport(MetalKit)
+        if prepared.needsMetalDisplay {
+            if metalView?.needsExternalDrawCall == true {
+                // No display callback exists for this surface: render now.
+                // Routing through requestDisplay() here would only mark the
+                // driver dirty again and spin without ever drawing.
+                renderOwner.renderMetal()
+            } else {
+                // MTKView: AppKit will call the delegate, which renders.
+                metalView?.requestDisplay()
+            }
+            return
         }
-        // Marks outside live-screen space cannot be translated: splice-based
-        // operations (ILM/DLM/SU/SD) record absolute buffer indices into the
-        // same min/max accumulator, and updateFullScreen marks rowEnd == rows.
-        if rowStart < 0 || rowEnd >= terminal.rows {
-            return fullFrame
+#endif
+        if let region = prepared.region {
+            setNeedsDisplay(region)
         }
-        // The changed live rows sit at absolute rows yBase+rowStart...; expand
-        // to their BiDi paragraph dependency range (a wrapped paragraph can
-        // span the yBase boundary into visible history) and intersect with the
-        // visible rows. Disjoint means nothing the user can see changed.
-        let maxRow = buffer.lines.count - 1
-        guard maxRow >= 0 else {
-            return fullFrame
-        }
-        let absoluteStart = max(0, min(buffer.yBase + rowStart, maxRow))
-        let absoluteEnd = max(absoluteStart, min(buffer.yBase + rowEnd, maxRow))
-        let dependencies = TerminalBidi.renderingDependencyRange(
-            rows: absoluteStart...absoluteEnd,
-            buffer: buffer,
-            maximumRows: terminal.options.maximumBidiParagraphRows)
-        let visible = buffer.yDisp...(buffer.yDisp + buffer.rows - 1)
-        if dependencies.overlaps(visible) {
-            return fullFrame
-        }
-        return nil
     }
-    #endif
+
+#if canImport(MetalKit)
+    /// Fallback for a draw that arrives with no snapshot prepared for it — a
+    /// live resize on the `MTKView` path, where AppKit calls the delegate
+    /// outside the frame tick.
+    ///
+    /// The render loop never needs it: `submitFrameDraw` hands the renderer a
+    /// snapshot immediately before every `render()`.
+    @MainActor
+    func refreshSnapshotForMetal () -> Bool {
+        guard let viewState = captureFrameViewState() else { return false }
+        return renderOwner.refreshMetalSnapshot(viewState: viewState)
+    }
+
+    @MainActor
+    func renderSnapshotForMetal (renderer: MetalTerminalRenderer,
+                                 target: any MetalRenderTarget) -> Bool {
+        guard let viewState = captureFrameViewState() else { return false }
+        return renderOwner.renderMetalSnapshot(
+            viewState: viewState,
+            renderer: renderer,
+            target: target)
+    }
+#endif
 
     func updateCursorPosition()
     {
-        guard let caretView else { return }
-        //let lineOrigin = CGPoint(x: 0, y: frame.height - (cellDimension.height * (CGFloat(terminal.buffer.y - terminal.buffer.yDisp + 1))))
-        //caretView.frame.origin = CGPoint(x: lineOrigin.x + (cellDimension.width * CGFloat(terminal.buffer.x)), y: lineOrigin.y)
-        let buffer = terminal.displayBuffer
-        let vy = buffer.yBase + buffer.y
+        guard let viewState = captureFrameViewState() else { return }
+#if canImport(MetalKit)
+        // The render loop owns the snapshot, and under Metal the renderer draws
+        // the cursor itself — `caretView` is not on screen. Refreshing here
+        // would only race the loop for a caret nobody sees.
+        if renderOwner.hasMetalRenderer {
+            frameDriver?.markDirty()
+            return
+        }
+#endif
+        renderOwner.withUpdatedCursor(viewState: viewState) { [weak self] cursor, rowCount in
+            self?.updateCursorPosition(from: cursor, rowCount: rowCount)
+        }
+    }
 
-        // Sole owner of caret visibility: shown only when the application wants
-        // it visible (DECTCEM) and the live cursor row is not below the visible
-        // viewport, which it is once the user scrolls back past it. The
-        // showCursor/hideCursor delegates route here, so a DECTCEM show while
-        // scrolled back cannot re-add the caret at a stale position.
-        if terminal.cursorHidden || vy >= buffer.yDisp + buffer.rows {
+    func updateCursorPosition (from cursor: SnapshotCursor?, rowCount: Int)
+    {
+        guard let caretView else { return }
+        guard let cursor, cursor.screenRow >= 0,
+              cursor.screenRow < rowCount else {
             caretView.removeFromSuperview()
             return
         }
-        if caretView.superview != self {
+        if !cursor.hidden && caretView.superview != self {
             addSubview(caretView)
+        } else if cursor.hidden && caretView.superview == self {
+            caretView.removeFromSuperview()
         }
-        let doublePosition = buffer.lines [vy].renderMode == .single ? 1.0 : 2.0
-        // Pending-wrap keeps x at cols until the next printable character.
-        let cursorColumn = min(max(buffer.x, 0), max(buffer.cols - 1, 0))
+        let doublePosition = cursor.renderMode == .single ? 1.0 : 2.0
         #if os(iOS) || os(visionOS)
-        let offset = (cellDimension.height * (CGFloat(buffer.y+(buffer.yBase))))
+        let offset = cellDimension.height * CGFloat(cursor.absoluteRow)
         let lineOrigin = CGPoint(x: 0, y: offset)
         #else
-        let offset = (cellDimension.height * (CGFloat(buffer.y-(buffer.yDisp-buffer.yBase)+1)))
+        let offset = cellDimension.height * CGFloat(cursor.screenRow + 1)
         let lineOrigin = CGPoint(x: 0, y: frame.height - offset)
         #endif
-        let charUnderCursor = buffer.lines [vy][cursorColumn]
-        // Span the caret across the full character so a block cursor covers a
-        // full-width (CJK) glyph instead of only its left half.
-        let cursorColumnWidth = max(1, Int(charUnderCursor.width))
-        // In BiDi rows the caret is drawn at the visual column of the logical
-        // cursor position.
-        var caretCol = cursorColumn
-        if vy >= 0, vy < buffer.lines.count,
-           let bidiLayout = TerminalBidi.layout(row: vy, buffer: buffer,
-                                                cols: terminal.cols, terminal: terminal,
-                                                font: fontSet.normal,
-                                                hostPolicy: bidiHostPolicy),
-           caretCol >= 0, caretCol < bidiLayout.logicalToVisualCol.count {
-            caretCol = bidiLayout.logicalToVisualCol[caretCol]
-        }
-        caretView.frame.origin = CGPoint(x: lineOrigin.x + (cellDimension.width * doublePosition * CGFloat(caretCol)), y: lineOrigin.y)
-        caretView.frame.size.width = cellDimension.width * doublePosition * CGFloat(cursorColumnWidth)
-        caretView.setText (ch: charUnderCursor)
+        caretView.frame.origin = CGPoint(
+            x: lineOrigin.x + cellDimension.width * doublePosition * CGFloat(cursor.visualCol),
+            y: lineOrigin.y)
+        caretView.frame.size.width = cellDimension.width * doublePosition *
+            CGFloat(cursor.columnWidth)
+        caretView.powerlineRenderMode = cursor.renderMode
+        caretView.setText(cursor.renderData)
     }
     
-    // Does not use a default argument and merge, because it is called back
+    /// Queues a frame without waiting for the next display-link callback.
     func updateDisplay ()
     {
-        updateTextBlinkLifecycle()
-        updateDisplay (notifyAccessibility: true)
-        updateDebugDisplay()
-        pendingDisplay = false
+        requestImmediateFrame()
     }
-    
-    //
-    // The code below is intended to not repaint too often, which can produce flicker, for example
-    // when the user refreshes the display, and this repains the screen, as dispatch delivers data
-    // in blocks of 1024 bytes, which is not enough to cover the whole screen, so this delays
-    // the update for a 1/600th of a second.
-    //
-    // It is also cheap, so should be called when new data has been posted or received.
-    func queuePendingDisplay ()
+
+    /// Invalidates what is on screen after terminal-visible state changed.
+    ///
+    /// `needsDisplay`/`setNeedsDisplay` alone is not enough on any renderer.
+    /// Drawing reads the render owner's snapshot, and only a frame tick
+    /// refreshes it, so
+    /// an AppKit invalidation repaints the *previous* frame's state — a
+    /// selection highlight that never appears, for example. Under a GPU
+    /// renderer it repaints nothing at all, because `draw(_:)` returns
+    /// immediately.
+    ///
+    /// Marking the frame driver dirty is what schedules the refresh. Safe from
+    /// any thread.
+    func invalidateTerminalContents () {
+        frameDriver?.markDirty()
+    }
+
+    /// Asks for the terminal to be redrawn.
+    ///
+    /// Call this after changing custom drawing state that SwiftTerm cannot
+    /// observe. View reset, palette and feed APIs mark the frame themselves.
+    ///
+    /// **`setNeedsDisplay` is not a substitute.** With a GPU renderer the view
+    /// does not draw through AppKit at all: `draw(_:)` returns immediately and
+    /// frames come from the frame driver, so an invalidation is silently
+    /// dropped. That has been true whenever Metal was enabled, and Metal is
+    /// the default on macOS since the render loop landed.
+    ///
+    /// Safe to call from any thread.
+    public nonisolated func requestRedraw ()
     {
-        if terminal.synchronizedOutputActive {
-            return
-        }
-        // throttle
-        if !pendingDisplay {
-            let fps60 = 16670000
-            // let fps30 = 16670000*2
-            let fpsDelay = fps60
-            pendingDisplay = true
-            DispatchQueue.main.asyncAfter(
-                deadline: DispatchTime (uptimeNanoseconds: DispatchTime.now().uptimeNanoseconds + UInt64 (fpsDelay)),
-                execute: updateDisplay)
-        } else {
-        }
+        frameSignal.markDirty()
     }
 
-#if canImport(MetalKit)
-    func noteMetalCursorActivityIfNeeded(_ cursor: (x: Int, y: Int, hidden: Bool)) {
-        if lastRenderedCursor == nil || lastRenderedCursor! != cursor {
-            metalRenderer?.noteCursorActivity()
-        }
-        lastRenderedCursor = cursor
-    }
-
-    func requestMetalDisplay() {
-        guard let metalView = metalView else {
+    /// Asks for a frame ahead of the display cadence. Safe from any thread.
+    ///
+    /// With a render loop running this signals the loop directly instead of
+    /// posting a main-queue tick. Two reasons, and the second is the one that
+    /// bit: signalling is lower latency than a hop through main, and a
+    /// main-queue tick is now so cheap that under a flood the main thread spun
+    /// on it — 4 134 immediate ticks for 423 drawn frames, against 442 total
+    /// ticks on the MTKView path. The old path was self-limiting only because
+    /// each tick carried the 6 ms draw.
+    func requestImmediateFrame ()
+    {
+#if os(macOS) && canImport(MetalKit)
+        // Not while nothing can see the terminal: signalling the loop bypasses
+        // the display link, which is where the occlusion pause lives, so this
+        // is the one path that could keep a render thread drawing into an
+        // occluded window (io-gaps.md G8b).
+        if let loop = activeRenderLoop(), frameDriver?.isVisibilitySuspended != true {
+            frameDriver?.markDirty()
+            loop.signal()
             return
         }
-        metalView.setNeedsDisplay(metalView.bounds)
-    }
-
-    func queueMetalDisplay() {
-        guard metalView != nil else {
-            return
-        }
-        if !pendingMetalDisplay {
-            let fps60 = 16670000
-            let fpsDelay = fps60
-            pendingMetalDisplay = true
-            DispatchQueue.main.asyncAfter(
-                deadline: DispatchTime (uptimeNanoseconds: DispatchTime.now().uptimeNanoseconds + UInt64 (fpsDelay))) { [weak self] in
-                    guard let self else { return }
-                    self.pendingMetalDisplay = false
-                    self.metalView?.setNeedsDisplay(self.metalView?.bounds ?? .zero)
-                }
-        }
-    }
 #endif
+        frameDriver.requestImmediateTick()
+    }
+
+    /// Counters describing how much data the view consumed and how many frames
+    /// it produced over a measurement window.
+    ///
+    /// Intended for benchmarking and for diagnosing a terminal that feels slow:
+    /// a large `bytesFed` with few `frames` means output is being coalesced (a
+    /// healthy flood), while many `idleTicks` means the display link is running
+    /// with nothing to show. Reset the window with `resetDiagnostics()`.
+    public struct Diagnostics: Sendable {
+        /// Bytes handed to `feed`, across every overload.
+        public var bytesFed: Int = 0
+        /// Calls to `feed`. Under a local process this is one per pty batch.
+        public var batches: Int = 0
+        /// Display or immediate ticks delivered to the frame driver.
+        public var ticks: Int = 0
+        /// Ticks that produced a frame.
+        public var frames: Int = 0
+        /// Ticks that found nothing to draw.
+        public var idleTicks: Int = 0
+        /// Times the frame driver paused the display link after idling.
+        public var pauses: Int = 0
+        /// Frames requested outside the display cadence.
+        public var immediateTicks: Int = 0
+        /// Frames actually drawn — GPU submissions on the Metal path, or
+        /// completed Core Graphics draws. Compare against `frames`: a large
+        /// gap means the driver is ticking without producing anything.
+        public var renders: Int = 0
+        /// Delegate notifications marshalled to the main queue by `onMain`.
+        /// Each one is a main-queue block that may take the terminal lock, so a
+        /// large value relative to `frames` means callback amplification.
+        public var mainHops: Int = 0
+        /// Frames prepared and drawn on the render loop rather than on the main
+        /// thread. Zero when no render loop is running.
+        public var renderLoopFrames: Int = 0
+        /// Render-loop wakeups folded into an already-pending frame. Under a
+        /// flood this should be large: it is the producer being coalesced,
+        /// which is the intended behaviour.
+        public var renderLoopCoalesced: Int = 0
+        /// Raw glyph-metrics cache activity in Metal Release profiling runs.
+        public var metricsCacheLookups: Int = 0
+        public var metricsCacheHits: Int = 0
+        public var metricsCacheMisses: Int = 0
+        /// Atlas-backed glyph-entry cache activity.
+        public var glyphAtlasLookups: Int = 0
+        public var glyphAtlasHits: Int = 0
+        public var glyphAtlasMisses: Int = 0
+        public var permanentEmptyGlyphHits: Int = 0
+        public var fullGlyphCacheMisses: Int = 0
+        public var glyphRasterizations: Int = 0
+        public var bitmapRasterizationResults: Int = 0
+        public var emptyRasterizationResults: Int = 0
+        public var transientRasterizationFailures: Int = 0
+        public var glyphBoundsQueries: Int = 0
+        public var glyphDrawCalls: Int = 0
+        public var negativeGlyphCacheEvictions: Int = 0
+        public var negativeGlyphCacheHighWater: Int = 0
+        public var rasterFontRegistryLookups: Int = 0
+        public var rasterFontRegistryHits: Int = 0
+        public var rasterFontRegistryMisses: Int = 0
+        public var rasterFontRegistryHighWater: Int = 0
+        public var rasterFontRegistryTeardowns: Int = 0
+        public var drawableHitsAvoidedMetricsLookup: Int = 0
+        public var drawableHitsRequiredMetricsLookup: Int = 0
+        public var metricsReusedFromDrawableMiss: Int = 0
+        public var metricsFontRegistryHighWater: Int = 0
+        public var fullIdentityTokensAliasingRasterIdentity: Int = 0
+        public var fullCacheKeysAliasingRasterGlyphKey: Int = 0
+        public var grayscaleAtlasGrows: Int = 0
+        public var colorAtlasGrows: Int = 0
+        public var grayscaleAtlasResets: Int = 0
+        public var colorAtlasResets: Int = 0
+        public var metricsEntryLimitResets: Int = 0
+        public var metricsFontLimitResets: Int = 0
+        public var metalRowsRebuilt: Int = 0
+        public var atlasInvalidationBuildAttempts: Int = 0
+
+        /// Mean bytes per `feed` call, or zero when nothing was fed.
+        public var meanBatchBytes: Int {
+            batches == 0 ? 0 : bytesFed / batches
+        }
+    }
+
+    /// A snapshot of the current diagnostics. Safe to read from any thread.
+    public var diagnostics: Diagnostics {
+        var result = diagnosticsState.withLock { $0 }
+        let frameCounters = frameDriver?.currentCounters ?? FrameDriverCounters()
+        result.ticks = frameCounters.ticks
+        result.frames = frameCounters.frames
+        result.idleTicks = frameCounters.idleTicks
+        result.pauses = frameCounters.pauses
+        result.immediateTicks = frameCounters.immediateTicks
+#if canImport(MetalKit)
+        result.renders += renderOwner.completedMetalRenders
+        if let counters = renderOwner.metalProfileCounters {
+            result.metricsCacheLookups = counters.metricsCacheLookups
+            result.metricsCacheHits = counters.metricsCacheHits
+            result.metricsCacheMisses = counters.metricsCacheMisses
+            result.glyphAtlasLookups = counters.glyphAtlasLookups
+            result.glyphAtlasHits = counters.glyphAtlasHits
+            result.glyphAtlasMisses = counters.glyphAtlasMisses
+            result.permanentEmptyGlyphHits = counters.permanentEmptyHits
+            result.fullGlyphCacheMisses = counters.fullGlyphCacheMisses
+            result.glyphRasterizations = counters.rasterizations
+            result.bitmapRasterizationResults = counters.bitmapRasterizationResults
+            result.emptyRasterizationResults = counters.emptyRasterizationResults
+            result.transientRasterizationFailures = counters.transientRasterizationFailures
+            result.glyphBoundsQueries = counters.glyphBoundsQueries
+            result.glyphDrawCalls = counters.glyphDrawCalls
+            result.negativeGlyphCacheEvictions = counters.negativeCacheEvictions
+            result.negativeGlyphCacheHighWater = counters.negativeCacheHighWater
+            result.rasterFontRegistryLookups = counters.rasterFontRegistryLookups
+            result.rasterFontRegistryHits = counters.rasterFontRegistryHits
+            result.rasterFontRegistryMisses = counters.rasterFontRegistryMisses
+            result.rasterFontRegistryHighWater = counters.rasterFontRegistryHighWater
+            result.rasterFontRegistryTeardowns = counters.rasterFontRegistryTeardowns
+            result.drawableHitsAvoidedMetricsLookup = counters.drawableHitsAvoidedMetricsLookup
+            result.drawableHitsRequiredMetricsLookup = counters.drawableHitsRequiredMetricsLookup
+            result.metricsReusedFromDrawableMiss = counters.metricsReusedFromDrawableMiss
+            result.metricsFontRegistryHighWater = counters.metricsFontRegistryHighWater
+            result.fullIdentityTokensAliasingRasterIdentity =
+                counters.fullIdentityTokensAliasingRasterIdentity
+            result.fullCacheKeysAliasingRasterGlyphKey =
+                counters.fullCacheKeysAliasingRasterGlyphKey
+            result.grayscaleAtlasGrows = counters.grayscaleAtlasGrows
+            result.colorAtlasGrows = counters.colorAtlasGrows
+            result.grayscaleAtlasResets = counters.grayscaleAtlasResets
+            result.colorAtlasResets = counters.colorAtlasResets
+            result.metricsEntryLimitResets = counters.metricsEntryLimitResets
+            result.metricsFontLimitResets = counters.metricsFontLimitResets
+            result.metalRowsRebuilt = counters.rowsRebuilt
+            result.atlasInvalidationBuildAttempts = counters.atlasInvalidationBuildAttempts
+        }
+#endif
+#if os(macOS) && canImport(MetalKit)
+        if let loopCounters = renderLoop?.currentCounters {
+            result.renderLoopFrames = loopCounters.frames
+            result.renderLoopCoalesced = loopCounters.coalesced
+        }
+#endif
+        return result
+    }
+
+    /// Starts a new measurement window.
+    public func resetDiagnostics ()
+    {
+        diagnosticsState.withLock { $0 = Diagnostics() }
+        frameDriver?.resetCounters()
+#if canImport(MetalKit)
+        renderOwner.resetMetalCounters()
+#endif
+#if os(macOS) && canImport(MetalKit)
+        renderLoop?.resetCounters()
+#endif
+    }
+
+    /// Counts one `feed` call. Called from the parse thread, so it uses its own
+    /// small lock rather than the terminal lock: this must not extend the
+    /// locked region that G2 is trying to shrink.
+    nonisolated func recordFedBytes (_ count: Int)
+    {
+        diagnosticsState.withLock { diagnostics in
+            diagnostics.bytesFed += count
+            diagnostics.batches += 1
+        }
+    }
+
+    func setupFrameDriver () {
+        let driver = FrameDriver(signal: frameSignal)
+        driver.onTick = { [weak self] in
+            self?.frameTick()
+        }
+        driver.onVisibilityChanged = { [weak self] visible in
+            self?.renderOwner.setTerminalVisibility(
+                visible ? .potentiallyVisible : .notVisible)
+        }
+        frameDriver = driver
+    }
     
     ///
     /// This takes a string returned by events (NSEvent or UIKey) as the 'charactersIngoringModifiers'
-    /// and returns the control-version of that, and only applies to a handful of characters
+    /// and returns the control-version of that, and only applies to a handful of characters.
+    ///
+    /// As in kitty and Ghostty, Control-/ also sends Control-_, the digits 2 to 8 send NUL, ESC,
+    /// FS, GS, RS, US and DEL, and Control-? sends DEL.
     ///
     func applyControlToEventCharacters (_ ch: String) -> [UInt8]
     {
@@ -2853,18 +4549,20 @@ extension TerminalView {
                 value = (ch.asciiValue! - 0x40 /* - 'A' + 1 */)
             case "a"..."z":
                 value = (ch.asciiValue! - 0x60 /* - 'a' + 1 */)
-            case "\\":
+            case "\\", "4":
                 value = 0x1c
-            case "_":
+            case "_", "/", "7":
                 value = 0x1f
-            case "]":
+            case "]", "5":
                 value = 0x1d
-            case "[":
+            case "[", "3":
                 value = 0x1b
             case "^", "6":
                 value = 0x1e
-            case " ":
+            case " ", "@", "2":
                 value = 0
+            case "?", "8":
+                value = 0x7f
             default:
                 return []
             }
@@ -2877,15 +4575,20 @@ extension TerminalView {
      */
     public var scrollThumbsize: CGFloat {
         get {
-            let displayBuffer = terminal.displayBuffer
-            if terminal.isDisplayBufferAlternate {
-                return 0
+            withTerminal { terminal in
+                scrollThumbsizeLocked()
             }
-            
-            // the thumb size is the proportion of the visible content of the
-            // entire content but don't make it too small
-            return max (CGFloat (displayBuffer.rows) / CGFloat (displayBuffer.lines.count), 0.01)
         }
+    }
+
+    func scrollThumbsizeLocked () -> CGFloat {
+        terminal.terminalLock.preconditionLocked()
+        let displayBuffer = terminal.displayBuffer
+        if terminal.isDisplayBufferAlternate {
+            return 0
+        }
+
+        return max (CGFloat (displayBuffer.rows) / CGFloat (displayBuffer.lines.count), 0.01)
     }
     
     /**
@@ -2893,18 +4596,25 @@ extension TerminalView {
      */
     public var scrollPosition: Double {
         get {
-            let displayBuffer = terminal.displayBuffer
-            if terminal.isDisplayBufferAlternate || displayBuffer.yDisp <= 0 {
-                return 0
+            withTerminal { terminal in
+                scrollPositionLocked()
             }
-            
-            let maxScrollback = displayBuffer.lines.count - displayBuffer.rows
-            if displayBuffer.yDisp >= maxScrollback {
-                return 1
-            }
-            
-            return Double (displayBuffer.yDisp) / Double (maxScrollback)
         }
+    }
+
+    func scrollPositionLocked () -> Double {
+        terminal.terminalLock.preconditionLocked()
+        let displayBuffer = terminal.displayBuffer
+        if terminal.isDisplayBufferAlternate || displayBuffer.yDisp <= 0 {
+            return 0
+        }
+
+        let maxScrollback = displayBuffer.lines.count - displayBuffer.rows
+        if displayBuffer.yDisp >= maxScrollback {
+            return 1
+        }
+
+        return Double (displayBuffer.yDisp) / Double (maxScrollback)
     }
     
     /// <summary>
@@ -2912,36 +4622,40 @@ extension TerminalView {
     /// </summary>
     public var canScroll: Bool {
         get {
-            let displayBuffer = terminal.displayBuffer
-            return !terminal.isDisplayBufferAlternate &&
-                displayBuffer.hasScrollback &&
-                displayBuffer.lines.count > displayBuffer.rows
+            withTerminal { terminal in
+                canScrollLocked()
+            }
         }
+    }
+
+    func canScrollLocked () -> Bool {
+        terminal.terminalLock.preconditionLocked()
+        let displayBuffer = terminal.displayBuffer
+        return !terminal.isDisplayBufferAlternate &&
+            displayBuffer.hasScrollback &&
+            displayBuffer.lines.count > displayBuffer.rows
     }
     
     public func scroll (toPosition: Double)
     {
-        let displayBuffer = terminal.displayBuffer
-        let oldPosition = displayBuffer.yDisp
-        
-        let maxScrollback = max(0, displayBuffer.lines.count - displayBuffer.rows)
-        var newScrollPosition = Int (Double (maxScrollback) * toPosition)
-        
-        if newScrollPosition < 0 {
-            newScrollPosition = 0
+        let scroll = withTerminal { terminal -> (position: Int, changed: Bool) in
+            let displayBuffer = terminal.displayBuffer
+            let oldPosition = displayBuffer.yDisp
+            let maxScrollback = max(0, displayBuffer.lines.count - displayBuffer.rows)
+            let position = max(0, min(Int(Double(maxScrollback) * toPosition), maxScrollback))
+            return (position, position != oldPosition)
         }
-        if newScrollPosition > maxScrollback {
-            newScrollPosition = maxScrollback
-        }
-
-        if newScrollPosition != oldPosition {
-            scrollTo(row: newScrollPosition)
+        if scroll.changed {
+            scrollTo(row: scroll.position)
         } else {
-            updateUserScrollingState(for: newScrollPosition, in: displayBuffer)
+            withTerminal { terminal in
+                updateUserScrollingStateLocked(for: scroll.position, in: terminal.displayBuffer)
+            }
         }
     }
 
-    private func updateUserScrollingState(for row: Int, in displayBuffer: Buffer) {
+    private func updateUserScrollingStateLocked(for row: Int, in displayBuffer: Buffer) {
+        terminal.terminalLock.preconditionLocked()
         let maxScrollback = max(0, displayBuffer.lines.count - displayBuffer.rows)
         let isUserScrolling = !terminal.isDisplayBufferAlternate && row < maxScrollback
         userScrolling = isUserScrolling
@@ -2950,159 +4664,159 @@ extension TerminalView {
     
     public func scrollTo (row: Int, notifyAccessibility: Bool = true)
     {
-        let displayBuffer = terminal.displayBuffer
-        let maxScrollback = max(0, displayBuffer.lines.count - displayBuffer.rows)
-        let targetRow = max(0, min(row, maxScrollback))
 #if os(iOS) || os(visionOS)
         resetManualScrollOffsetWithinRow()
 #endif
-        updateUserScrollingState(for: targetRow, in: displayBuffer)
-
-        if targetRow != displayBuffer.yDisp {
+        let didScroll = withTerminal { terminal in
+            let displayBuffer = terminal.displayBuffer
+            let maxScrollback = max(0, displayBuffer.lines.count - displayBuffer.rows)
+            let targetRow = max(0, min(row, maxScrollback))
+            updateUserScrollingStateLocked(for: targetRow, in: displayBuffer)
+            if targetRow == displayBuffer.yDisp {
+                return false
+            }
             terminal.setViewYDisp (targetRow)
-
+            
             // tell the terminal we want to refresh all the rows
             terminal.refresh (startRow: 0, endRow: terminal.rows)
-
-            // do the display update
-            updateDisplay (notifyAccessibility: notifyAccessibility)
-            //selectionView.notifyScrolled(source: terminal)
+            return true
+        }
+        if didScroll {
+            setAccessibilityNotificationForNextFrame(notifyAccessibility)
+            frameDriver.markDirty()
             terminalDelegate?.scrolled (source: self, position: scrollPosition)
             updateScroller()
-            setNeedsDisplay(frame)
+#if os(macOS)
+            showOverlayScroller()
+#endif
         } else {
 #if os(iOS) || os(visionOS)
-            // The row did not change, but we just cleared any sub-row manual
-            // scroll offset above; resync contentOffset so a later output-driven
-            // updateScroller does not snap the view up by that stale fractional
-            // amount.
+            // resetManualScrollOffsetWithinRow() changed the visual offset even
+            // when the terminal stayed on the same row.
             updateScroller()
 #endif
         }
     }
     
+    /// Scrolls to the bottom of the terminal and resumes auto-scrolling on new output
+    public func scrollToBottom()
+    {
+        let maxRow = withTerminal { terminal -> Int in
+            terminal.userScrolling = false
+            let displayBuffer = terminal.displayBuffer
+            return max(0, displayBuffer.lines.count - displayBuffer.rows)
+        }
+        scrollTo(row: maxRow)
+    }
+
     /// Scrolls the content of the terminal one page up
     public func pageUp()
     {
-        if terminal.isDisplayBufferAlternate {
+        let state = withTerminal { terminal in
+            (terminal.isDisplayBufferAlternate, terminal.rows)
+        }
+        if state.0 {
             send (EscapeSequences.cmdPageUp)
         } else {
-            scrollUp (lines: terminal.rows)
+            scrollUp (lines: state.1)
         }
     }
     
     /// Scrolls the content of the terminal one page down
     public func pageDown ()
     {
-        if terminal.isDisplayBufferAlternate {
+        let state = withTerminal { terminal in
+            (terminal.isDisplayBufferAlternate, terminal.rows)
+        }
+        if state.0 {
             send (EscapeSequences.cmdPageDown)
         } else {
-            scrollDown (lines: terminal.rows)
+            scrollDown (lines: state.1)
         }
     }
 
     /// Scrolls up the content of the terminal the specified number of lines
     public func scrollUp (lines: Int)
     {
-        let newPosition = max (terminal.displayBuffer.yDisp - lines, 0)
+        let newPosition = withTerminal { terminal in
+            max (terminal.displayBuffer.yDisp - lines, 0)
+        }
         scrollTo (row: newPosition)
     }
     
     /// Scrolls down the content of the terminal the specified number of lines
     public func scrollDown (lines: Int)
     {
-        let displayBuffer = terminal.displayBuffer
-        let newPosition = max (0, min (displayBuffer.yDisp + lines, displayBuffer.lines.count - displayBuffer.rows))
+        let newPosition = withTerminal { terminal in
+            let displayBuffer = terminal.displayBuffer
+            return max (0, min (displayBuffer.yDisp + lines, displayBuffer.lines.count - displayBuffer.rows))
+        }
         scrollTo (row: newPosition)
     }
-
-    /// Scrolls to the bottom of the terminal and resumes auto-scrolling on new output
-    public func scrollToBottom()
+      
+    /// Asks for a frame before the batch is parsed rather than after it.
+    ///
+    /// Ghostty calls `queueRender()` before parsing, and the reason is the
+    /// wakeup, not the frame: when the display link is paused, marking dirty
+    /// posts a main-queue block that starts the link. Doing it first overlaps
+    /// that hop with the parse instead of queuing it behind one (io-gaps.md
+    /// G4, WO-C5).
+    ///
+    /// A frame that arrives before the batch has landed costs almost nothing:
+    /// `refresh` skips unchanged rows and `prepareFrame` returns early when
+    /// there is no update range.
+    nonisolated func markDirtyBeforeParsing()
     {
-        terminal.userScrolling = false
-        let displayBuffer = terminal.displayBuffer
-        let maxRow = max(0, displayBuffer.lines.count - displayBuffer.rows)
-        scrollTo(row: maxRow)
+        frameSignal.markDirty()
     }
 
-    func feedPrepare()
+    func feedPrepareLocked()
     {
+        terminal.terminalLock.preconditionLocked()
         search.invalidate()
-        // Preserve manual selection while output is streaming when mouse reporting is disabled.
-        if allowMouseReporting {
-            selection.active = false
-        }
-        startDisplayUpdates()
     }
     
-    func feedFinish ()
+    func feedFinish (synchronizedOutputActive: Bool)
     {
-        suspendDisplayUpdates ()
-        if shouldDisplayImmediatelyAfterUserInput() {
-            displayImmediately()
-            return
-        }
-        queuePendingDisplay()
-    }
-
-    private func shouldDisplayImmediatelyAfterUserInput() -> Bool {
-        guard !terminal.synchronizedOutputActive else { return false }
-        let last = loadLastUserInputUptimeNs()
-        guard last > 0 else { return false }
-        let now = DispatchTime.now().uptimeNanoseconds
-        guard now >= last else { return false }
-        return now - last <= interactiveInputDisplayWindowNs
-    }
-
-    /// Records that the user just produced input, opening the immediate-display
-    /// window. `lastUserInputUptimeNs` is written here on the main thread but
-    /// read from the (possibly background) feed thread in feedFinish(), so both
-    /// accesses go through userInputLock to avoid a data race / torn read.
-    func recordUserInput() {
-        let now = DispatchTime.now().uptimeNanoseconds
-        userInputLock.lock()
-        lastUserInputUptimeNs = now
-        userInputLock.unlock()
-    }
-
-    private func loadLastUserInputUptimeNs() -> UInt64 {
-        userInputLock.lock()
-        defer { userInputLock.unlock() }
-        return lastUserInputUptimeNs
-    }
-
-    private func displayImmediately() {
-        guard !Thread.isMainThread else {
-            updateDisplay()
-            return
-        }
-        // Coalesce with the throttled path: if a redraw is already scheduled
-        // (either here or via queuePendingDisplay), don't post another. This
-        // bypasses the 16.67ms frame-rate timer so echo feels responsive, while
-        // still collapsing a burst of feed chunks into a single main-thread
-        // redraw instead of flooding the main queue with one updateDisplay per
-        // chunk. updateDisplay() clears pendingDisplay, reopening the gate.
-        guard !pendingDisplay else { return }
-        pendingDisplay = true
-        DispatchQueue.main.async { [weak self] in
-            self?.updateDisplay()
-        }
+        // No special case for recent user input any more. WO-C5 asks for the
+        // frame before the parse rather than after it, and WO-C6 makes the
+        // first frame after idle skip the vsync wait — which is what the
+        // 150 ms window existed to hide, and it only ever hid it for input
+        // (io-gaps.md G4, WO-C7).
+        frameDriver.markDirty()
     }
 
     /// Sends data to the terminal emulator for interpretation, this can be invoked from a background thread
-    public func feed (byteArray: ArraySlice<UInt8>)
+    public nonisolated func feed (byteArray: ArraySlice<UInt8>)
     {
-        feedPrepare()
-        terminal.feed (buffer: byteArray)
-        feedFinish()
+        feedSender.feed(byteArray: byteArray)
     }
     
     /// Sends data to the terminal emulator for interpretation, this can be invoked from a background thread
-    public func feed (text: String)
+    public nonisolated func feed (text: String)
     {
-        feedPrepare()
-        terminal.feed (text: text)
-        feedFinish()
+        feedSender.feed(text: text)
+    }
+
+    /// Current OSC 7501 records. This value snapshot is safe to read without
+    /// the terminal lock. It includes inherited program names.
+    public nonisolated var programStatusRecords: [TerminalProgramStatus] {
+        programStatusState.withLock { $0 }
+    }
+
+    public nonisolated func programStatusChanged(source: Terminal, records: [TerminalProgramStatus]) {
+        programStatusState.withLock { $0 = records }
+        eventQueue.post(.programStatusChanged)
+    }
+
+    /// Removes a status record and its descendants. An empty id removes all.
+    public func clearProgramStatus(id: String = "") {
+        withTerminal { $0.clearProgramStatus(id: id) }
+    }
+
+    /// Call this after a remote process exits and its output is parsed.
+    public func programStatusProcessExited() {
+        withTerminal { $0.programStatusProcessExited() }
     }
          
     /**
@@ -3110,21 +4824,78 @@ extension TerminalView {
      */
     public func resize (cols: Int, rows: Int)
     {
-        terminal.resize (cols: cols, rows: rows)
-        sizeChanged (source: terminal)
-        terminal.softReset()
+        renderOwner.mailbox.discardPendingSize()
+        let cellPixels = currentCellPixelSize()
+        withTerminal { terminal in
+            terminal.viewResizeGeneration &+= 1
+            terminal.resize(
+                cols: cols,
+                rows: rows,
+                cellWidth: cellPixels.width,
+                cellHeight: cellPixels.height)
+            terminal.softReset()
+        }
+        terminalDelegate?.sizeChanged(source: self, newCols: cols, newRows: rows)
+        updateScroller()
     }
 
     /// Resizes the logical grid while optionally preserving terminal modes.
-    /// The existing `resize(cols:rows:)` API intentionally keeps its soft-reset
-    /// behavior for compatibility with existing consumers.
+    ///
+    /// With `preservingTerminalModes` false this is ``resize(cols:rows:)``,
+    /// including its soft reset. With true, the buffers, cursor and modes
+    /// (alternate screen, origin/margin modes, cursor visibility) survive.
+    /// When the grid changes, each buffer's scroll region and left/right
+    /// margins are reset to that buffer's full extent, as emulators do on a
+    /// size change; a same-size call preserves them too.
     public func resize(cols: Int, rows: Int, preservingTerminalModes: Bool)
     {
-        if preservingTerminalModes {
-            resizeTerminalPreservingModes(cols: cols, rows: rows)
-        } else {
+        guard preservingTerminalModes else {
             resize(cols: cols, rows: rows)
+            return
         }
+        renderOwner.mailbox.discardPendingSize()
+        let cellPixels = currentCellPixelSize()
+        let newSize = withTerminal { terminal -> (cols: Int, rows: Int) in
+            terminal.viewResizeGeneration &+= 1
+            let oldCols = terminal.cols
+            let oldRows = terminal.rows
+            terminal.resize(
+                cols: cols,
+                rows: rows,
+                cellWidth: cellPixels.width,
+                cellHeight: cellPixels.height)
+            if terminal.cols != oldCols || terminal.rows != oldRows {
+                selection.active = false
+                search.invalidate()
+                for buffer in [terminal.normalBuffer, terminal.altBuffer] {
+                    buffer.scrollTop = 0
+                    buffer.scrollBottom = max(0, buffer.rows - 1)
+                    buffer.marginLeft = 0
+                    buffer.marginRight = max(0, buffer.cols - 1)
+                }
+            }
+            return (terminal.cols, terminal.rows)
+        }
+        accessibility.invalidate()
+        terminalDelegate?.sizeChanged(source: self, newCols: newSize.cols, newRows: newSize.rows)
+        updateScroller()
+        frameDriver.markDirty()
+    }
+
+    /// Makes OSC 133 a parser no-op for a terminal that mirrors another
+    /// emulator's grid (a tmux pane): no fresh-line, prompt marks or prompt
+    /// click arming. Call immediately after creating the view, before the
+    /// first feed. The override lives on the parser and survives RIS/DECSTR.
+    public func ignoreSemanticPromptsForTmuxMirror()
+    {
+        withTerminal { terminal in
+            terminal.registerOscHandler(code: 133) { _ in }
+        }
+    }
+
+    /// Whether DEC private mode 2026 (synchronized output) is active, as a copied value.
+    public var synchronizedOutputActive: Bool {
+        withTerminal { $0.synchronizedOutputActive }
     }
 
     /**
@@ -3134,19 +4905,28 @@ extension TerminalView {
      */
     public func changeScrollback (_ newScrollback: Int?)
     {
-        terminal.changeScrollback(newScrollback)
+        withTerminal { terminal in
+            terminal.changeScrollback(newScrollback)
+        }
         updateScroller()
         terminalDelegate?.scrolled(source: self, position: scrollPosition)
-        queuePendingDisplay()
+        frameDriver.markDirty()
     }
 
+    /// Prepends the newest physical rows of a sequential text/rendition capture
+    /// that fit in the remaining history capacity, above the existing history.
+    /// Returns the number of physical rows inserted (it can exceed the capture's
+    /// logical line count). Selections follow their text; the viewport keeps
+    /// showing the same rows.
     @discardableResult
     public func prependScrollbackCapture(byteArray: ArraySlice<UInt8>, maximumScrollback: Int? = nil) -> Int {
-        search.invalidate()
-        let insertedRows = terminal.prependScrollbackCapture(
-            byteArray: byteArray,
-            maximumScrollback: maximumScrollback
-        )
+        let insertedRows = withTerminal { terminal in
+            search.invalidate()
+            return terminal.prependScrollbackCapture(
+                byteArray: byteArray,
+                maximumScrollback: maximumScrollback
+            )
+        }
         guard insertedRows > 0 else {
             return 0
         }
@@ -3158,8 +4938,8 @@ extension TerminalView {
         updateScroller()
 #endif
         terminalDelegate?.scrolled(source: self, position: scrollPosition)
-        updateDisplay(notifyAccessibility: false)
-        queuePendingDisplay()
+        setAccessibilityNotificationForNextFrame(false)
+        frameDriver.markDirty()
         return insertedRows
     }
 
@@ -3169,51 +4949,46 @@ extension TerminalView {
      */
     public func clearScrollback ()
     {
-        search.invalidate()
-        terminal.clearScrollback()
-        let displayBuffer = terminal.displayBuffer
 #if os(iOS) || os(visionOS)
         resetManualScrollOffsetWithinRow()
 #endif
-        updateUserScrollingState(for: displayBuffer.yDisp, in: displayBuffer)
+        withTerminal { terminal in
+            search.invalidate()
+            terminal.clearScrollback()
+            let displayBuffer = terminal.displayBuffer
+            updateUserScrollingStateLocked(for: displayBuffer.yDisp, in: displayBuffer)
+        }
         updateScroller()
         terminalDelegate?.scrolled(source: self, position: scrollPosition)
-        queuePendingDisplay()
+        frameDriver.markDirty()
     }
     
     /**
      * Sends the specified slice of byte arrays to the program running under the terminal emulator
      * - Parameter data: the slice of an array to send to the client
      *
-     * Thread contract (F.4): this runs the OSC 133 submission heuristic
-     * (`terminal.registerUserInput`) synchronously, mutating terminal state, so
-     * it MUST be called on the same thread that drives `terminal.feed` — the
-     * main thread for a `TerminalView`. Do not call it from a background I/O
-     * thread while feeding the terminal from another; doing so races the
-     * scanner against the parser and can leave the buffer armed after a
-     * submission (the injection direction). A host that needs a different
-     * threading model must marshal input onto the view's thread itself. The
-     * debug precondition below catches violations early.
+     * Callable from any thread. A host that receives input on a transport
+     * thread — SSH, an agent, an automation bridge — can call this directly
+     * with no marshalling (io-gaps.md G5a).
+     *
+     * The one rule: do not call it from inside a terminal delegate callback.
+     * Those run with the terminal lock held, and this method takes that lock;
+     * the precondition below catches it rather than deadlocking.
+     *
+     * Ordering between concurrent callers is the caller's problem, and always
+     * was: two threads sending at once interleave their bytes in the pty. If
+     * the order of two sends matters, the caller must sequence them.
      */
-    public func send(data: ArraySlice<UInt8>)
+    public nonisolated func send(data: ArraySlice<UInt8>)
     {
-        #if DEBUG
-        // Catch a host that violates the same-thread contract. Uses
-        // `Thread.isMainThread` rather than `dispatchPrecondition(.onQueue:)`,
-        // which is unreliable under Swift Concurrency's main-actor executor.
-        assert(Thread.isMainThread, "TerminalView.send(data:) must be called on the main thread")
-        #endif
-        recordUserInput()
-        ensureCaretIsVisible ()
-        #if os(iOS) || os(visionOS)
-        if TerminalView.textInputDebugEnabled {
-            let previewBytes = data.prefix(32).map { String(format: "%02X", $0) }.joined(separator: " ")
-            print("UITextInput[\(TerminalView.textInputLogCounter + 1)]: send bytes=\(data.count) [\(previewBytes)]")
-            TerminalView.textInputLogCounter += 1
-        }
-        #endif
-        terminal.registerUserInput(data)
-        terminalDelegate?.send(source: self, data: data)
+        inputSender.send(data: data)
+    }
+
+    /// Terminal-level paste has already registered its semantic input while
+    /// holding the terminal lock. Deliver after leaving that lock; calling
+    /// send(data:) here would register twice and attempt to take it again.
+    public nonisolated func sendUserInput(source: Terminal, data: ArraySlice<UInt8>) {
+        inputSender.sendRegistered(data: data)
     }
     
     /**
@@ -3238,60 +5013,97 @@ extension TerminalView {
     public func send (_ bytes: [UInt8]) {
         send (data: (bytes)[...])
     }
-    
-    func sendKeyUp ()
-    {
-        send (terminal.applicationCursor ? EscapeSequences.moveUpApp : EscapeSequences.moveUpNormal)
+
+    /// Sends a mouse response using the currently negotiated protocol.
+    ///
+    /// Cell coordinates are zero-based. Pixel coordinates default to the cell
+    /// coordinates, matching Terminal.sendEvent. Buttons 0, 1, 2 and 4...7
+    /// are supported; other buttons and negative or overflowing cell coordinates
+    /// are ignored. `motion` reports the pointer moving with `button` held, as
+    /// Terminal.sendMotion does (a drag); it is ignored on a release. The host
+    /// decides when to report an event;
+    /// this method does not consult allowMouseReporting or suppress off-mode
+    /// reports. Unlike keyboard input, mouse responses do not register an
+    /// OSC 133 semantic submission. Delivery is synchronous on the main actor,
+    /// after releasing the terminal lock.
+    ///
+    /// Use one handler to report each gesture. If both the host and the view
+    /// report the same gesture, the program receives duplicate mouse events.
+    /// Disable the view's matching gesture handler when the host reports it.
+    ///
+    /// For a drag, send a press before motion. If the mouse mode requires a
+    /// release, send it when the gesture ends or is cancelled. A host that
+    /// stops a reported drag must still send that release. Without it, the
+    /// program can keep the button in the pressed state.
+    @MainActor
+    public func sendMouseEvent(button: Int, release: Bool, motion: Bool = false,
+                               shift: Bool = false, meta: Bool = false,
+                               control: Bool = false, col: Int, row: Int,
+                               pixelX: Int? = nil, pixelY: Int? = nil) {
+        guard let bytes = renderOwner.mouseEventBytes(
+            button: button, release: release, motion: motion, shift: shift, meta: meta,
+            control: control, col: col, row: row, pixelX: pixelX, pixelY: pixelY)
+        else { return }
+        terminalDelegate?.send(source: self, data: bytes[...])
     }
     
-    func sendKeyDown ()
+    /// Sends the Up key with the active terminal modes.
+    public func sendKeyUp ()
     {
-        send (terminal.applicationCursor ? EscapeSequences.moveDownApp : EscapeSequences.moveDownNormal)
+        send (withTerminal { $0.applicationCursor } ? EscapeSequences.moveUpApp : EscapeSequences.moveUpNormal)
+    }
+    
+    /// Sends the Down key with the active terminal modes.
+    public func sendKeyDown ()
+    {
+        send (withTerminal { $0.applicationCursor } ? EscapeSequences.moveDownApp : EscapeSequences.moveDownNormal)
+    }
+
+    /// Sends the Home key with the active cursor-key mode.
+    public func sendKeyHome() {
+        send(withTerminal { $0.applicationCursor }
+             ? EscapeSequences.moveHomeApp : EscapeSequences.moveHomeNormal)
+    }
+
+    /// Sends the End key with the active cursor-key mode.
+    public func sendKeyEnd() {
+        send(withTerminal { $0.applicationCursor }
+             ? EscapeSequences.moveEndApp : EscapeSequences.moveEndNormal)
     }
 
     private func sendHorizontalKey(left: Bool) {
-        let buffer = terminal.displayBuffer
-        let row = buffer.yBase + buffer.y
-        let baseDirection = TerminalBidi.resolvedBaseDirection(
-            row: row, buffer: buffer, cols: terminal.cols, terminal: terminal,
-            font: fontSet.normal, hostPolicy: bidiHostPolicy)
-        let swap = terminal.bidiArrowKeySwap && baseDirection == .rightToLeft
-        let sendLeft = swap ? !left : left
-        if sendLeft {
-            send(terminal.applicationCursor
-                 ? EscapeSequences.moveLeftApp : EscapeSequences.moveLeftNormal)
-        } else {
-            send(terminal.applicationCursor
-                 ? EscapeSequences.moveRightApp : EscapeSequences.moveRightNormal)
+        let sequence = withTerminal { terminal in
+            let buffer = terminal.displayBuffer
+            let row = buffer.yBase + buffer.y
+            let baseDirection = TerminalBidi.resolvedBaseDirection(
+                row: row, buffer: buffer, cols: terminal.cols, terminal: terminal,
+                font: fontSet.normal, hostPolicy: bidiHostPolicy)
+            let swap = terminal.bidiArrowKeySwap && baseDirection == .rightToLeft
+            let sendLeft = swap ? !left : left
+            return sendLeft
+                ? (terminal.applicationCursor ? EscapeSequences.moveLeftApp : EscapeSequences.moveLeftNormal)
+                : (terminal.applicationCursor ? EscapeSequences.moveRightApp : EscapeSequences.moveRightNormal)
         }
+        send(sequence)
     }
     
-    func sendKeyLeft()
+    /// Sends the Left key with the active terminal modes.
+    public func sendKeyLeft()
     {
         sendHorizontalKey(left: true)
     }
     
-    func sendKeyRight ()
+    /// Sends the Right key with the active terminal modes.
+    public func sendKeyRight ()
     {
         sendHorizontalKey(left: false)
     }
     
-    class AppleImage: TerminalImage, KittyPlacementImage {
+    class AppleImage: TerminalImage {
         var image: TTImage
         var pixelWidth: Int
         var pixelHeight: Int
         var col: Int
-        var kittyIsKitty: Bool = false
-        var kittyImageId: UInt32?
-        var kittyImageNumber: UInt32?
-        var kittyPlacementId: UInt32?
-        var kittyZIndex: Int = 0
-        var kittyCol: Int = 0
-        var kittyRow: Int = 0
-        var kittyCols: Int = 0
-        var kittyRows: Int = 0
-        var kittyPixelOffsetX: Int = 0
-        var kittyPixelOffsetY: Int = 0
         
         init (image: TTImage, width: Int, height: Int, onCol: Int) {
             self.image = image
@@ -3302,11 +5114,15 @@ extension TerminalView {
     }
     // Computes the number of columns and rows used by the image
     func computeCellRows (_ size: CGSize) -> (cols: Int, rows: Int) {
-        return (cols: Int ((size.width+cellDimension.width-1)/cellDimension.width),
-                rows: Int ((size.height+cellDimension.height-1)/cellDimension.height))
+        guard let metrics = cachedImageMetricsValue() else {
+            return (0, 0)
+        }
+        let cellSize = metrics.cellSize
+        return (cols: Int ((size.width+cellSize.width-1)/cellSize.width),
+                rows: Int ((size.height+cellSize.height-1)/cellSize.height))
     }
     
-    public func createImageFromBitmap(source: Terminal, bytes: inout [UInt8], width: Int, height: Int) {
+    public nonisolated func createImageFromBitmap(source: Terminal, bytes: inout [UInt8], width: Int, height: Int) {
         let rgbColorSpace = CGColorSpaceCreateDeviceRGB()
         let bitmapInfo: CGBitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
         let pixelData = NSData(bytes: bytes, length: bytes.count)
@@ -3322,30 +5138,43 @@ extension TerminalView {
         }
         
         let image = TTImage (cgImage: cgimage, size: CGSize (width: width, height: height))
-        if let context = terminal.kittyPlacementContext {
-            insertImage (image, width: context.widthRequest, height: context.heightRequest, preserveAspectRatio: context.preserveAspectRatio)
-        } else {
-            insertImage (image, width: CGFloat (width) > frame.width ? .percent(100) : .auto, height: .auto, preserveAspectRatio: true)
+        guard let metrics = cachedImageMetricsValue() else {
+            return
         }
+        let terminalWidth = CGFloat(source.cols) * metrics.cellSize.width
+        insertImage(image, terminal: source,
+                    width: CGFloat(width) > terminalWidth ? .percent(100) : .auto,
+                    height: .auto,
+                    preserveAspectRatio: true)
     }
    
-    public func createImage (source: Terminal, data: Data, width widthRequest: ImageSizeRequest, height heightRequest: ImageSizeRequest, preserveAspectRatio: Bool)
+    public nonisolated func createImage (source: Terminal, data: Data, width widthRequest: ImageSizeRequest, height heightRequest: ImageSizeRequest, preserveAspectRatio: Bool)
     {
         guard let img = TTImage(data: data) else {
             return
         }
-        insertImage (img, width: widthRequest, height: heightRequest, preserveAspectRatio: preserveAspectRatio)
+        insertImage(img, terminal: source,
+                    width: widthRequest,
+                    height: heightRequest,
+                    preserveAspectRatio: preserveAspectRatio)
     }
     
     // Inserts the specified image at the current buffer position (x, y) using the specified size requests
     // and aspect ratio request.   The insertion is done by adding slices of the image, one per line
     // to the buffer.
-    func insertImage (_ image: TTImage, width widthRequest: ImageSizeRequest, height heightRequest: ImageSizeRequest, preserveAspectRatio: Bool)
+    nonisolated func insertImage (_ image: TTImage,
+                                  terminal: Terminal,
+                                  width widthRequest: ImageSizeRequest,
+                                  height heightRequest: ImageSizeRequest,
+                                  preserveAspectRatio: Bool)
     {
+        guard let metrics = cachedImageMetricsValue() else {
+            return
+        }
+        let cellSize = metrics.cellSize
         let buffer = terminal.buffer
         var img = image
-        let displayScale = getImageScale ()
-        let placementContext = terminal.kittyPlacementContext
+        let displayScale = metrics.imageScale
         
         // Converts a size request in a single dimension into an absolute pixel value, where
         // the `dim` is the request, `regionSize` is the available view space, and `imageSize` is
@@ -3363,44 +5192,25 @@ extension TerminalView {
             }
         }
 
-        func pixelSizeForImage (_ image: TTImage) -> CGSize? {
-            #if os(macOS)
-            for rep in image.representations {
-                if rep.pixelsWide > 0 && rep.pixelsHigh > 0 {
-                    return CGSize(width: rep.pixelsWide, height: rep.pixelsHigh)
-                }
-            }
-            return nil
-            #else
-            if let cgImage = image.cgImage {
-                return CGSize(width: cgImage.width, height: cgImage.height)
-            }
-            let scale = image.scale
-            if scale > 0 {
-                return CGSize(width: image.size.width * scale, height: image.size.height * scale)
-            }
-            return nil
-            #endif
-        }
-
-        let pixelSize = placementContext == nil ? nil : pixelSizeForImage(img)
         let widthImageSize: CGFloat
         let heightImageSize: CGFloat
         switch widthRequest {
         case .auto:
-            widthImageSize = pixelSize?.width ?? img.size.width
+            widthImageSize = img.size.width
         default:
             widthImageSize = img.size.width
         }
         switch heightRequest {
         case .auto:
-            heightImageSize = pixelSize?.height ?? img.size.height
+            heightImageSize = img.size.height
         default:
             heightImageSize = img.size.height
         }
 
-        var width = getPixels (fromDim: widthRequest, regionSize: frame.width, imageSize: widthImageSize, cellSize: cellDimension.width)
-        var height = getPixels (fromDim: heightRequest, regionSize: frame.height, imageSize: heightImageSize, cellSize: cellDimension.height)
+        let terminalRegion = CGSize(width: CGFloat(terminal.cols) * cellSize.width,
+                                    height: CGFloat(terminal.rows) * cellSize.height)
+        var width = getPixels (fromDim: widthRequest, regionSize: terminalRegion.width, imageSize: widthImageSize, cellSize: cellSize.width)
+        var height = getPixels (fromDim: heightRequest, regionSize: terminalRegion.height, imageSize: heightImageSize, cellSize: cellSize.height)
         
         if preserveAspectRatio {
             switch (widthRequest, heightRequest) {
@@ -3415,30 +5225,9 @@ extension TerminalView {
             }
         }
         
-        let rows = Int (ceil (height/cellDimension.height))
-        let cols = Int (ceil (width/cellDimension.width))
-        let placementRow = buffer.y + buffer.yBase
-        let placementCol = buffer.x
-        if let context = placementContext,
-           let imageId = context.imageId,
-           let placementId = context.placementId {
-            terminal.registerKittyPlacement(imageId: imageId,
-                                            placementId: placementId,
-                                            parentImageId: context.parentImageId,
-                                            parentPlacementId: context.parentPlacementId,
-                                            parentOffsetH: context.parentOffsetH,
-                                            parentOffsetV: context.parentOffsetV,
-                                            pixelOffsetX: context.pixelOffsetX,
-                                            pixelOffsetY: context.pixelOffsetY,
-                                            col: placementCol,
-                                            row: placementRow,
-                                            cols: cols,
-                                            rows: rows,
-                                            zIndex: context.zIndex,
-                                            isVirtual: false)
-        }
+        let rows = Int (ceil (height/cellSize.height))
         
-        let stripeSize = CGSize (width: width, height: cellDimension.height)
+        let stripeSize = CGSize (width: width, height: cellSize.height)
         var didScroll = false
         #if os(iOS) || os(visionOS)
         var srcY: CGFloat = 0
@@ -3449,30 +5238,16 @@ extension TerminalView {
         let heightRatio = img.size.height/height
         for _ in 0..<rows {
             #if os(macOS)
-            srcY -= cellDimension.height * heightRatio
+            srcY -= cellSize.height * heightRatio
             #endif
-            guard let stripe = drawImageInStripe (image: img, srcY: srcY, width: width, srcHeight: cellDimension.height * heightRatio, dstHeight: cellDimension.height, size: stripeSize) else {
+            guard let stripe = drawImageInStripe (image: img, srcY: srcY, width: width, srcHeight: cellSize.height * heightRatio, dstHeight: cellSize.height, size: stripeSize) else {
                 continue
             }
             #if os(iOS) || os(visionOS)
-            srcY += cellDimension.height * heightRatio
+            srcY += cellSize.height * heightRatio
             #endif
             
-            let attachedImage = AppleImage (image: stripe, width: Int (stripeSize.width), height: Int (cellDimension.height), onCol: terminal.buffer.x)
-            if let context = placementContext {
-                attachedImage.kittyIsKitty = true
-                attachedImage.kittyImageId = context.imageId
-                attachedImage.kittyImageNumber = context.imageNumber
-                attachedImage.kittyPlacementId = context.placementId
-                attachedImage.kittyZIndex = context.zIndex
-                attachedImage.kittyCol = placementCol
-                attachedImage.kittyRow = placementRow
-                attachedImage.kittyCols = cols
-                attachedImage.kittyRows = rows
-                attachedImage.kittyPixelOffsetX = context.pixelOffsetX
-                attachedImage.kittyPixelOffsetY = context.pixelOffsetY
-            }
-            
+            let attachedImage = AppleImage (image: stripe, width: Int (stripeSize.width), height: Int (cellSize.height), onCol: terminal.buffer.x)
             buffer.attachImage(attachedImage, toLineAt: buffer.y+buffer.yBase)
 
             terminal.updateRange (buffer.y)
@@ -3491,23 +5266,23 @@ extension TerminalView {
         if didScroll {
             terminal.updateFullScreen()
         }
-        if let context = placementContext,
-           context.cursorPolicy == 0,
-           !context.isRelative {
-            let moveCols = max(1, cols)
-            let moveRows = max(1, rows)
-            let targetCol = placementCol + moveCols
-            let targetRow = placementRow + moveRows
-            buffer.x = targetCol
-            buffer.y = targetRow - buffer.yBase
-            terminal.restrictCursor()
-        }
     }
     
+    /// Which clicks at an OSC 133 shell prompt move the cursor to the click.
+    /// The default, `.enabled`, takes a click with no modifiers held.
+    /// `.requireModifier([.option])` takes only an Option-click, as
+    /// Terminal.app does, and leaves plain clicks to select and open links.
+    public var semanticPromptClickBehavior: SemanticPromptClickBehavior {
+        get { withTerminal { $0.semanticPromptClickBehavior } }
+        set { withTerminal { $0.semanticPromptClickBehavior = newValue } }
+    }
+
     /// Set to true if the selection is active, false otherwise
     public var selectionActive: Bool {
         get {
-            selection.active
+            withTerminal { _ in
+                selection.active
+            }
         }
     }
     
@@ -3515,32 +5290,192 @@ extension TerminalView {
     /// Returns the contents of the selection, if active, or nil otherwise
     public func getSelection () -> String?
     {
-        if selection.active {
-            return selection.getSelectedText()
+        withTerminal { _ in
+            if selection.active {
+                return selection.getSelectedText()
+            }
+            return nil
         }
-        return nil
-    }
-
-    /// Returns the selected text as contiguous runs carrying each cell's style,
-    /// or `nil` when there is no active selection.
-    public func getSelectedStyledRuns () -> [StyledTextRun]?
-    {
-        if selection.active {
-            return selection.getSelectedStyledRuns()
-        }
-        return nil
     }
     
+    /// Returns the selected text as contiguous runs carrying each cell's style,
+    /// or `nil` when there is no active selection. The runs' joined text is
+    /// the text ``getSelection()`` returns.
+    public func getSelectedStyledRuns () -> [StyledTextRun]?
+    {
+        withTerminal { _ in
+            if selection.active {
+                return selection.getSelectedStyledRuns()
+            }
+            return nil
+        }
+    }
+
     /// Selects the entire buffer
     public func selectAll () {
-        selection.selectAll()
+        withTerminal { _ in
+            selection.selectAll()
+        }
     }
     
     /// Clears the selection
     public func selectNone () {
-        selection.selectNone()
+        withTerminal { _ in
+            selection.selectNone()
+        }
     }
 
+}
+
+/// Token bucket shared by macOS wheel and iOS finger-to-wheel reporting, and by the cursor keys
+/// Alternate Scroll Mode generates in their place.
+///
+/// Accelerated gestures can represent hundreds of lines in one event. Bounding generated input
+/// keeps a slow terminal application from being overwhelmed while preserving a small immediate
+/// burst for a deliberate gesture.
+struct WheelReportBudget {
+    static let reportsPerSecond: Double = 100
+    static let burst = 6
+
+    private var allowance: Double = Double(Self.burst)
+    private var stampNanoseconds: UInt64
+
+    init(nowNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds) {
+        stampNanoseconds = nowNanoseconds
+    }
+
+    /// A classic wheel event is one notch however far acceleration says it travelled, because a
+    /// mouse report is a notch and the application chooses how far a notch scrolls.
+    static func requestedReports(lineCount: Int, isPrecise: Bool) -> Int {
+        guard lineCount != 0 else { return 0 }
+        return isPrecise ? requestedKeys(lineCount: lineCount) : 1
+    }
+
+    /// A cursor key carries its own distance, so an accelerated event keeps its line count up to
+    /// the burst and only the rate is bounded.
+    static func requestedKeys(lineCount: Int) -> Int {
+        Int(min(lineCount.magnitude, UInt(burst)))
+    }
+
+    mutating func grant(
+        _ wanted: Int,
+        nowNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds
+    ) -> Int {
+        guard wanted > 0 else { return 0 }
+        let elapsedNanoseconds: UInt64
+        if nowNanoseconds >= stampNanoseconds {
+            elapsedNanoseconds = nowNanoseconds - stampNanoseconds
+            stampNanoseconds = nowNanoseconds
+        } else {
+            elapsedNanoseconds = 0
+        }
+        let elapsed = Double(elapsedNanoseconds) / 1_000_000_000
+        allowance = min(
+            Double(Self.burst),
+            allowance + elapsed * Self.reportsPerSecond)
+        let granted = min(wanted, Int(allowance))
+        allowance -= Double(granted)
+        return granted
+    }
+}
+
+/// Fractional wheel or finger travel retained only within one gesture and one route.
+///
+/// Sub-cell movement is banked for the route that produced it. Travel that was reported to the
+/// application must not scroll locally when a modifier arrives, and travel that was handled
+/// locally must not become part of a report when the modifier lifts, so a change of route starts
+/// the bank over.
+struct WheelDistanceAccumulator<Route: Equatable> {
+    private(set) var remainder: CGFloat = 0
+    private var route: Route?
+
+    mutating func reset() {
+        remainder = 0
+        route = nil
+    }
+
+    mutating func takeWholeLines(distance: CGFloat, cellHeight: CGFloat, route: Route) -> Int {
+        guard cellHeight > 0 else { return 0 }
+        if route != self.route {
+            remainder = 0
+            self.route = route
+        }
+        remainder += distance
+        let lines = Int(remainder / cellHeight)
+        remainder -= CGFloat(lines) * cellHeight
+        return lines
+    }
+}
+
+enum ProgramScrollRoute: Equatable {
+    case mouse
+    case cursorKeys
+    case none
+}
+
+struct ProgramScrollRouting {
+    static func route(
+        allowMouseReporting: Bool,
+        shiftBypassesMouseReporting: Bool,
+        mouseTracking: Bool,
+        alternateBuffer: Bool,
+        alternateScrollMode: Bool
+    ) -> ProgramScrollRoute {
+        guard allowMouseReporting, !shiftBypassesMouseReporting else { return .none }
+        if mouseTracking {
+            return .mouse
+        }
+        if alternateBuffer && alternateScrollMode {
+            return .cursorKeys
+        }
+        return .none
+    }
+
+    /// An alternate buffer is captured even when Alternate Scroll Mode is reset. It has no local
+    /// scrollback, so allowing UIScrollView to pan it only exposes empty space.
+    static func capturesGesture(
+        allowMouseReporting: Bool,
+        mouseTracking: Bool,
+        alternateBuffer: Bool
+    ) -> Bool {
+        allowMouseReporting && (mouseTracking || alternateBuffer)
+    }
+}
+
+extension TerminalViewDelegate {
+    public func kittyClipboardCapabilities(source: TerminalView) -> KittyClipboardCapabilities {
+        []
+    }
+
+    public func kittyClipboardAvailableMimeTypes(
+        source: TerminalView,
+        location: KittyClipboardLocation
+    ) -> [String]? {
+        nil
+    }
+
+    public func kittyClipboardRead(
+        source: TerminalView,
+        location: KittyClipboardLocation,
+        mimeType: String
+    ) -> KittyClipboardReadResult? {
+        nil
+    }
+
+    public func kittyClipboardWrite(
+        source: TerminalView,
+        location: KittyClipboardLocation,
+        content: KittyClipboardWriteContent
+    ) -> KittyClipboardWriteResult {
+        .unsupported
+    }
+
+    public func kittyClipboardRequestPermission(
+        source: TerminalView,
+        request: KittyClipboardPermissionRequest
+    ) -> KittyClipboardPermissionResult {
+        .deny
+    }
 }
 
 #if canImport(UIKit) && DEBUG
@@ -3555,3 +5490,5 @@ extension TerminalView {
 #endif
 
 #endif
+
+#endif // !SWIFTTERM_EMBEDDED

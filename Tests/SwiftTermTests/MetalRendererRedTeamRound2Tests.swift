@@ -1,3 +1,12 @@
+//
+//  MetalRendererRedTeamRound2Tests.swift
+//
+//  Fork red-team round 2, migrated to v1.99.2's renderer seams: incremental
+//  Metal frames equal from-scratch rebuilds (`MetalRowCacheTests.Harness`),
+//  font tables stay bounded, and font resets reach the renderer. The fork's
+//  cache-entry counters (`debugMetricsSnapshot`) and line-info cache have no
+//  v1.99.2 counterpart; their observable consequences are asserted instead.
+//
 #if os(macOS)
 import AppKit
 import Foundation
@@ -8,231 +17,156 @@ import Testing
 @MainActor
 @Suite(.serialized)
 final class MetalRendererRedTeamRound2Tests {
-    @Test func fallbackFontRetentionStaysBoundedAcrossShaperChurn() throws {
-        let (view, renderer) = makeHarness(scrollback: 3_000)
-        view.terminal.feed(text: "warm fallback fonts 界🙂\r\n")
-        transferTerminalDirtyRange(to: view)
-        _ = renderer.debugBuildSnapshot(scale: 1)
-        let initialCount = renderer.debugMetricsSnapshot().retainedFontCount
+    private static let rows = 12
+
+    /// Rows the harness view actually shows (its frame sizes the grid).
+    private func visibleRows(_ harness: MetalRowCacheTests.Harness) -> Int {
+        harness.view.terminalDimensions.rows
+    }
+
+    private func makeHarness(scrollback: Int = 200) throws -> MetalRowCacheTests.Harness {
+        try #require(MetalRowCacheTests.Harness(cols: 40, rows: 12, scrollback: scrollback))
+    }
+
+    private func optimizedAndTruth(_ harness: MetalRowCacheTests.Harness) async throws
+        -> (MetalRowCacheTests.DrawnFrame, MetalRowCacheTests.DrawnFrame)
+    {
+        let optimized = try #require(await harness.frame())
+        let truth = try #require(await harness.freshFrame())
+        return (optimized, truth)
+    }
+
+    /// Point sizes of the fonts the CG text builder uses for the visible rows.
+    private func renderedFontSizes(_ view: TerminalView) -> [CGFloat] {
+        let snapshot = TerminalSnapshot()
+        let viewState = FrameViewState(view: view)
+        view.withTerminal { terminal in
+            _ = snapshot.refresh(terminal: terminal, viewState: viewState,
+                                 selection: SnapshotSelectionState(selection: view.selection))
+        }
+        let context = SnapshotRenderContext(viewState: viewState, snapshot: snapshot)
+        var sizes = Set<CGFloat>()
+        for (index, row) in snapshot.rows.enumerated() {
+            let info = view.textBuilder.buildAttributedString(row: row, absoluteRow: snapshot.firstRow + index,
+                                                              context: context)
+            for segment in info.segments where segment.attributedString.length > 0 {
+                if let font = segment.attributedString.attribute(.font, at: 0, effectiveRange: nil) as? NSFont {
+                    sizes.insert(font.pointSize)
+                }
+            }
+        }
+        return sizes.sorted()
+    }
+
+    @Test(.enabled(if: MetalRowCacheTests.metalIsUsable, "needs Metal"))
+    func fallbackFontRetentionStaysBoundedAcrossShaperChurn() async throws {
+        let harness = try makeHarness(scrollback: 3_000)
+        harness.view.feed(text: "warm fallback fonts 界🙂\r\n")
+        _ = try #require(await harness.frame())
+        let initialCount = harness.renderer.debugRasterFontRegistryCount
         var maximumCount = initialCount
 
         for frame in 0..<2_200 {
-            view.terminal.feed(text: "unique shaper key \(frame) 界🙂\r\n")
-            transferTerminalDirtyRange(to: view)
-            renderer.debugBuildOnly(scale: 1)
-            maximumCount = max(maximumCount, renderer.debugMetricsSnapshot().retainedFontCount)
+            harness.view.feed(text: "unique shaper key \(frame) 界🙂\r\n")
+            _ = try #require(await harness.frame())
+            maximumCount = max(maximumCount, harness.renderer.debugRasterFontRegistryCount)
         }
 
-        let finalCount = renderer.debugMetricsSnapshot().retainedFontCount
-        print(
-            "REDTEAM2_SHAPER_CHURN frames=2200 retainedFonts=\(initialCount)->\(finalCount) " +
-            "maximum=\(maximumCount)"
-        )
-        #expect(finalCount <= initialCount + 2)
-        #expect(maximumCount <= initialCount + 2)
+        let finalCount = harness.renderer.debugRasterFontRegistryCount
+        #expect(finalCount <= initialCount + 2, "retained fonts \(initialCount) -> \(finalCount)")
+        #expect(maximumCount <= initialCount + 2, "retained fonts peaked at \(maximumCount)")
     }
 
-    @Test func refreshStampBumpedAfterDirtyCaptureStillForcesFullRebuild() throws {
-        let (view, renderer) = makeHarness()
+    /// A full-refresh change made after output scrolled (the fork's late
+    /// refresh stamp) still rebuilds every row.
+    @Test(.enabled(if: MetalRowCacheTests.metalIsUsable, "needs Metal"))
+    func refreshStampBumpedAfterDirtyCaptureStillForcesFullRebuild() async throws {
+        let harness = try makeHarness()
         let blockLine = "\u{2588}\u{2580}\u{2584}\u{258c}\u{2590} cached block glyphs\r\n"
-        view.terminal.feed(text: String(repeating: blockLine, count: 40))
-        transferTerminalDirtyRange(to: view)
-        _ = renderer.debugBuildSnapshot(scale: 1)
+        harness.view.feed(text: String(repeating: blockLine, count: 40))
+        _ = try #require(await harness.frame())
 
-        renderer.debugResetMetrics()
-        view.terminal.feed(text: "scroll one row\r\n")
-        transferTerminalDirtyRange(to: view)
-        let capturedGeneration = view.metalDirtyRangeFullRefreshGeneration
-        view.antiAliasCustomBlockGlyphs.toggle()
-        let currentGeneration = view.terminal.fullRefreshGeneration
+        harness.view.feed(text: "scroll one row\r\n")
+        harness.view.antiAliasCustomBlockGlyphs.toggle()
+        let (optimized, truth) = try await optimizedAndTruth(harness)
 
-        let optimized = renderer.debugBuildSnapshot(scale: 1)
-        let metrics = renderer.debugMetricsSnapshot()
-        let forced = renderer.debugBuildSnapshot(scale: 1, forceFullRebuild: true)
-        let snapshotsEqual = optimized == forced
-
-        print(
-            "REDTEAM2_LATE_STAMP snapshotsEqual=\(snapshotsEqual) " +
-            "capturedGeneration=\(String(describing: capturedGeneration)) " +
-            "currentGeneration=\(currentGeneration) rowsRebuilt=\(metrics.rowsRebuilt) " +
-            "fullRefreshInvalidations=\(metrics.fullRefreshInvalidations)"
-        )
-        #expect(capturedGeneration != currentGeneration)
-        #expect(metrics.rowsRebuilt == 12)
-        #expect(metrics.fullRefreshInvalidations == 1)
-        #expect(snapshotsEqual)
+        #expect(optimized.rebuilt == visibleRows(harness))
+        #expect(optimized.rows == truth.rows)
+        #expect(optimized.pixels == truth.pixels)
     }
 
-    @Test func resetFontSizeUsesCoordinatedMetalCacheReset() throws {
-        let (view, renderer) = makeHarness()
+    /// `resetFontSize` reaches the renderer: the frame changes, equals a
+    /// cold rebuild, and draws at the new font size.
+    @Test(.enabled(if: MetalRowCacheTests.metalIsUsable, "needs Metal"))
+    func resetFontSizeUsesCoordinatedMetalCacheReset() async throws {
+        let harness = try makeHarness()
+        let view = harness.view
         view.font = NSFont.monospacedSystemFont(ofSize: 24, weight: .regular)
-        view.resize(cols: 40, rows: 12)
-        view.frame.size = CGSize(width: view.cellDimension.width * 40,
-                                 height: view.cellDimension.height * 12)
-        view.terminal.feed(text: "font reset bypass probe\r\n")
-        transferTerminalDirtyRange(to: view)
-        let beforeSnapshot = renderer.debugBuildSnapshot(scale: 1)
-
+        view.resize(cols: 40, rows: Self.rows)
+        view.feed(text: "font reset bypass probe\r\n")
+        let before = try #require(await harness.frame())
         let beforeFontSize = view.font.pointSize
-        let beforeCellDimension = view.cellDimension!
-        let beforeCachedFontSizes = cachedLineFontSizes(in: view)
-        let beforeCaches = renderer.debugMetricsSnapshot()
+        let beforeCellDimension = try #require(view.cellDimension)
+
         view.resetFontSize()
         let afterFontSize = view.font.pointSize
-        let afterCellDimension = view.cellDimension!
-        let clearedCaches = renderer.debugMetricsSnapshot()
-        let clearedLineInfoCount = view.lineInfoCache.count
-        let afterSnapshot = renderer.debugBuildSnapshot(scale: 1)
-        let afterCachedFontSizes = cachedLineFontSizes(in: view)
-        let afterCaches = renderer.debugMetricsSnapshot()
-        let snapshotsEqual = beforeSnapshot == afterSnapshot
-        let rowSnapshotsEqual = beforeSnapshot.rows == afterSnapshot.rows
+        let afterCellDimension = try #require(view.cellDimension)
+        let (after, truth) = try await optimizedAndTruth(harness)
 
-        print(
-            "REDTEAM2_RESET_FONT_SIZE fontSize=\(beforeFontSize)->\(afterFontSize) " +
-            "cellWidth=\(beforeCellDimension.width)->\(afterCellDimension.width) " +
-            "cellHeight=\(beforeCellDimension.height)->\(afterCellDimension.height) " +
-            "retainedFonts=\(beforeCaches.retainedFontCount)->\(clearedCaches.retainedFontCount)->\(afterCaches.retainedFontCount) " +
-            "rowCache=\(beforeCaches.rowCacheEntryCount)->\(clearedCaches.rowCacheEntryCount)->\(afterCaches.rowCacheEntryCount) " +
-            "glyphCache=\(beforeCaches.glyphCacheEntryCount)->\(clearedCaches.glyphCacheEntryCount)->\(afterCaches.glyphCacheEntryCount) " +
-            "cachedFontSizes=\(beforeCachedFontSizes)->\(afterCachedFontSizes) " +
-            "snapshotsEqual=\(snapshotsEqual) rowSnapshotsEqual=\(rowSnapshotsEqual)"
-        )
-        #expect(beforeCaches.retainedFontCount > 0)
-        #expect(beforeCaches.rowCacheEntryCount > 0)
-        #expect(beforeCaches.glyphCacheEntryCount > 0)
-        #expect(beforeCaches.scaledFontCacheEntryCount > 0)
-        #expect(beforeCaches.shaperCacheEntryCount > 0)
-        #expect(clearedCaches.retainedFontCount == 0)
-        #expect(clearedCaches.rowCacheEntryCount == 0)
-        #expect(clearedCaches.glyphCacheEntryCount == 0)
-        #expect(clearedCaches.scaledFontCacheEntryCount == 0)
-        #expect(clearedCaches.shaperCacheEntryCount == 0)
-        #expect(clearedCaches.customGlyphCacheEntryCount == 0)
-        #expect(clearedLineInfoCount == 0)
         #expect(afterFontSize != beforeFontSize)
         #expect(afterCellDimension != beforeCellDimension)
-        #expect(afterCachedFontSizes.contains(afterFontSize))
-        #expect(!snapshotsEqual)
-        #expect(!rowSnapshotsEqual)
+        #expect(renderedFontSizes(view).contains(afterFontSize))
+        #expect(!renderedFontSizes(view).contains(beforeFontSize))
+        #expect(after.rows != before.rows)
+        #expect(after.rows == truth.rows)
+        #expect(after.pixels == truth.pixels)
     }
 
-    @Test func scrollCoalescedWithHoverLinkInvalidationMatchesFullRebuild() throws {
-        let (view, renderer) = makeHarness()
+    @Test(.enabled(if: MetalRowCacheTests.metalIsUsable, "needs Metal"))
+    func scrollCoalescedWithHoverLinkInvalidationMatchesFullRebuild() async throws {
+        let harness = try makeHarness()
+        let view = harness.view
         view.linkHighlightMode = .hover
         let linkLine = "https://example.com cached link\r\n"
-        view.terminal.feed(text: String(repeating: linkLine, count: 40))
-        transferTerminalDirtyRange(to: view)
-        _ = renderer.debugBuildSnapshot(scale: 1)
+        view.feed(text: String(repeating: linkLine, count: 40))
+        _ = try #require(await harness.frame())
 
-        renderer.debugResetMetrics()
-        view.terminal.feed(text: "scroll one row\r\n")
-
-        let buffer = view.terminal.displayBuffer
-        let targetRow = buffer.yDisp + 5
-        let match = try #require(
-            view.terminal.linkMatch(
-                at: .buffer(Position(col: 5, row: targetRow)),
-                mode: .explicitAndImplicit
-            )
-        )
-        let fullRefreshGenerationBefore = view.terminal.fullRefreshGeneration
-        let lineInfoGenerationBefore = view.lineInfoCacheGeneration
+        view.feed(text: "scroll one row\r\n")
+        let match = try #require(view.withTerminal { terminal in
+            terminal.linkMatch(at: .buffer(Position(col: 5, row: terminal.displayBuffer.yDisp + 5)),
+                               mode: .explicitAndImplicit)
+        })
         view.linkHighlightRange = match.rowRanges
         view.invalidateLinkHighlight(oldRange: nil, newRange: match.rowRanges)
-        let fullRefreshGenerationAfter = view.terminal.fullRefreshGeneration
-        let lineInfoGenerationAfter = view.lineInfoCacheGeneration
-        transferTerminalDirtyRange(to: view)
+        let (optimized, truth) = try await optimizedAndTruth(harness)
 
-        let optimized = renderer.debugBuildSnapshot(scale: 1)
-        let metrics = renderer.debugMetricsSnapshot()
-        let forced = renderer.debugBuildSnapshot(scale: 1, forceFullRebuild: true)
-        let snapshotsEqual = optimized == forced
-
-        print(
-            "REDTEAM2_HOVER_LINK_SCROLL snapshotsEqual=\(snapshotsEqual) " +
-            "rowsRemapped=\(metrics.rowsRemapped) rowsRebuilt=\(metrics.rowsRebuilt) " +
-            "rowsCached=\(metrics.rowsCached) dirtyRows=\(metrics.dirtyRowsRequested) " +
-            "suppressed=\(metrics.fullScrollDirtyRangesSuppressed) " +
-            "fullRefreshGeneration=\(fullRefreshGenerationBefore)->\(fullRefreshGenerationAfter) " +
-            "lineInfoGeneration=\(lineInfoGenerationBefore)->\(lineInfoGenerationAfter)"
-        )
-        #expect(metrics.rowsRemapped > 0)
-        #expect(metrics.dirtyRowsRequested == 12)
-        #expect(metrics.fullScrollDirtyRangesSuppressed == 1)
-        #expect(fullRefreshGenerationAfter == fullRefreshGenerationBefore)
-        #expect(lineInfoGenerationAfter == lineInfoGenerationBefore)
-        #expect(snapshotsEqual)
+        #expect(optimized.moved > 0, "scrolled rows should be reused, not rebuilt")
+        #expect(optimized.rows == truth.rows)
+        #expect(optimized.pixels == truth.pixels)
     }
 
-    @Test func perRowLineInfoInvalidationRebuildsWithoutDirtyTransfer() throws {
-        let (view, renderer) = makeHarness()
+    /// Highlighting one row's link rebuilds that row and reuses the others.
+    @Test(.enabled(if: MetalRowCacheTests.metalIsUsable, "needs Metal"))
+    func perRowLineInfoInvalidationRebuildsWithoutDirtyTransfer() async throws {
+        let harness = try makeHarness()
+        let view = harness.view
         view.linkHighlightMode = .hover
         let linkLine = "https://example.com cached link\r\n"
-        view.terminal.feed(text: String(repeating: linkLine, count: 40))
-        transferTerminalDirtyRange(to: view)
-        _ = renderer.debugBuildSnapshot(scale: 1)
+        view.feed(text: String(repeating: linkLine, count: 40))
+        _ = try #require(await harness.frame())
 
-        let buffer = view.terminal.displayBuffer
-        let targetRow = buffer.yDisp + 5
-        let match = try #require(
-            view.terminal.linkMatch(
-                at: .buffer(Position(col: 5, row: targetRow)),
-                mode: .explicitAndImplicit
-            )
-        )
-        renderer.debugResetMetrics()
+        let match = try #require(view.withTerminal { terminal in
+            terminal.linkMatch(at: .buffer(Position(col: 5, row: terminal.displayBuffer.yDisp + 5)),
+                               mode: .explicitAndImplicit)
+        })
         view.linkHighlightRange = match.rowRanges
-        view.invalidateLineInfoCache(row: targetRow)
+        view.invalidateLinkHighlight(oldRange: nil, newRange: match.rowRanges)
+        let (optimized, truth) = try await optimizedAndTruth(harness)
 
-        let optimized = renderer.debugBuildSnapshot(scale: 1)
-        let metrics = renderer.debugMetricsSnapshot()
-        let forced = renderer.debugBuildSnapshot(scale: 1, forceFullRebuild: true)
-        let snapshotsEqual = optimized == forced
-
-        print(
-            "REDTEAM2_LINE_INFO_NO_DIRTY snapshotsEqual=\(snapshotsEqual) " +
-            "rowsRebuilt=\(metrics.rowsRebuilt) rowsCached=\(metrics.rowsCached) " +
-            "dirtyRows=\(metrics.dirtyRowsRequested)"
-        )
-        #expect(metrics.rowsRebuilt == 1)
-        #expect(metrics.rowsCached == 11)
-        #expect(metrics.dirtyRowsRequested == 0)
-        #expect(snapshotsEqual)
-    }
-
-    private func makeHarness(scrollback: Int = 200) -> (TerminalView, MetalTerminalRenderer) {
-        let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
-        view.resize(cols: 40, rows: 12)
-        view.terminal.changeScrollback(scrollback)
-        view.frame.size = CGSize(width: view.cellDimension.width * 40,
-                                 height: view.cellDimension.height * 12)
-        let renderer = MetalTerminalRenderer(debugTerminalView: view)
-        view.metalRenderer = renderer
-        return (view, renderer)
-    }
-
-    private func cachedLineFontSizes(in view: TerminalView) -> [CGFloat] {
-        Array(Set(view.lineInfoCache.values.flatMap { info in
-            info.info.segments.compactMap { segment -> CGFloat? in
-                guard segment.attributedString.length > 0 else { return nil }
-                return (segment.attributedString.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)?.pointSize
-            }
-        })).sorted()
-    }
-
-    private func transferTerminalDirtyRange(to view: TerminalView) {
-        let terminal = view.terminal!
-        guard let (rowStart, rowEnd) = terminal.getUpdateRange() else {
-            view.setMetalDirtyRange(nil)
-            return
-        }
-        let buffer = terminal.displayBuffer
-        let maxRow = buffer.lines.count - 1
-        let start = max(0, min(buffer.yDisp + rowStart, maxRow))
-        let end = max(0, min(buffer.yDisp + rowEnd, maxRow))
-        view.setMetalDirtyRange(start <= end ? start...end : nil)
-        terminal.clearUpdateRange()
+        #expect(optimized.rebuilt == 1)
+        #expect(optimized.cached == visibleRows(harness) - 1)
+        #expect(optimized.rows == truth.rows)
+        #expect(optimized.pixels == truth.pixels)
     }
 }
 #endif

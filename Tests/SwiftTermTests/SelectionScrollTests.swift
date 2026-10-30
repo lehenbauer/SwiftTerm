@@ -12,6 +12,7 @@ import XCTest
 
 @testable import SwiftTerm
 
+#if os(macOS) || os(Linux)
 final class SelectionScrollTests: XCTestCase {
 
     private func makeTerminal (rows: Int = 10, cols: Int = 40) -> Terminal {
@@ -82,6 +83,30 @@ final class SelectionScrollTests: XCTestCase {
 
         XCTAssertTrue (selection.active)
         XCTAssertEqual (selectedText (selection), "LINE_1")
+    }
+
+    /// A top-anchored region without history moves only the rows in that region.
+    func testSelectionFollowsTopAnchoredPartialRegionScroll () {
+        let terminal = makeTerminal ()
+        terminal.feed (text: "\u{1b}[?1049h")
+        paintLines (terminal, count: 10)
+
+        let movedSelection = SelectionService (terminal: terminal)
+        movedSelection.setSelection (
+            start: Position (col: 0, row: 4),
+            end: Position (col: 10, row: 4))
+        let fixedSelection = SelectionService (terminal: terminal)
+        fixedSelection.setSelection (
+            start: Position (col: 0, row: 9),
+            end: Position (col: 10, row: 9))
+
+        // Region rows 1...9. Row 10 is outside the region.
+        terminal.feed (text: "\u{1b}[1;9r\u{1b}[9;1H\r\n\u{1b}[1;10r")
+
+        XCTAssertEqual (movedSelection.start.row, 3)
+        XCTAssertEqual (selectedText (movedSelection), "LINE_5")
+        XCTAssertEqual (fixedSelection.start.row, 9)
+        XCTAssertEqual (selectedText (fixedSelection), "LINE_10")
     }
 
     /// Full-screen scrolls push lines into the scrollback and advance yDisp, so
@@ -322,3 +347,5 @@ final class SelectionScrollTests: XCTestCase {
         XCTAssertEqual (selectedText (selection), textBeforePrepend)
     }
 }
+
+#endif

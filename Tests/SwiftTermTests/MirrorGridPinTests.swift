@@ -68,6 +68,34 @@ final class MirrorGridPinTests {
         #expect(!terminal.wraparound)
         #expect(terminal.marginMode)
         #expect(terminal.cursorHidden)
+        // Contract change (v1.99.2 integration): a changed grid resets the
+        // scroll region and margins to the new full extent, absorbing Whisp's
+        // TerminalGridPin margin reset (issue #31: a region kept from the old
+        // grid funnels full redraws through a stale band).
+        #expect(terminal.buffer.scrollTop == 0)
+        #expect(terminal.buffer.scrollBottom == 29)
+        #expect(terminal.buffer.marginLeft == 0)
+        #expect(terminal.buffer.marginRight == 99)
+        #expect(terminal.normalBuffer.scrollTop == 0)
+        #expect(terminal.normalBuffer.marginLeft == 0)
+    }
+
+    @Test func sameSizePreservingResizeKeepsRegionAndMargins() {
+        let view = makeView()
+        let terminal = view.terminal!
+        terminal.feed(text: "\u{1b}[?1049h")
+        terminal.applicationCursor = true
+        terminal.setMarginMode(true)
+        terminal.buffer.scrollTop = 4
+        terminal.buffer.scrollBottom = 19
+        terminal.buffer.marginLeft = 9
+        terminal.buffer.marginRight = 69
+
+        view.resize(cols: 80, rows: 24, preservingTerminalModes: true)
+
+        #expect(terminal.isCurrentBufferAlternate)
+        #expect(terminal.applicationCursor)
+        #expect(terminal.marginMode)
         #expect(terminal.buffer.scrollTop == 4)
         #expect(terminal.buffer.scrollBottom == 19)
         #expect(terminal.buffer.marginLeft == 9)

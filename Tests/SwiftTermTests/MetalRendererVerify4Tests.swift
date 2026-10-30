@@ -1,3 +1,12 @@
+//
+//  MetalRendererVerify4Tests.swift
+//
+//  Fork verification round 4, migrated to v1.99.2's renderer seams. A Kitty
+//  put that fails validation only touches LRU bookkeeping, so the Metal frame
+//  must reuse every cached row and stay identical. The fork's Kitty render
+//  mutation generation no longer exists; the unchanged frame, row reuse and
+//  empty update range are the observable contract.
+//
 #if os(macOS)
 import AppKit
 import Foundation
@@ -8,112 +17,66 @@ import Testing
 @MainActor
 @Suite(.serialized)
 final class MetalRendererVerify4Tests {
-    @Test func rejectedKittyPutReusesCachedRowsWithoutChangingOutput() {
-        let (view, renderer) = makeDebugHarness()
-        view.terminal.feed(text: "stable renderer content")
-        transferTerminalDirtyRange(to: view)
-        _ = renderer.debugBuildSnapshot(scale: 1)
+    private static let rows = 12
 
+    /// Rows the harness view actually shows (its frame sizes the grid).
+    private func visibleRows(_ harness: MetalRowCacheTests.Harness) -> Int {
+        harness.view.terminalDimensions.rows
+    }
+
+    private func kitty(_ control: String, payload: [UInt8]? = nil) -> String {
+        if let payload {
+            return "\u{1b}_G\(control);\(Data(payload).base64EncodedString())\u{1b}\\"
+        }
+        return "\u{1b}_G\(control)\u{1b}\\"
+    }
+
+    @Test(.enabled(if: MetalRowCacheTests.metalIsUsable, "needs Metal"))
+    func rejectedKittyPutReusesCachedRowsWithoutChangingOutput() async throws {
+        let harness = try #require(MetalRowCacheTests.Harness(cols: 40, rows: Self.rows))
+        let view = harness.view
+        view.feed(text: "stable renderer content")
         let pixels = Array(repeating: [UInt8](arrayLiteral: 255, 0, 0, 255), count: 4).flatMap { $0 }
-        sendKitty(
-            terminal: view.terminal,
-            control: "a=t,f=32,s=2,v=2,t=d,i=42,q=2",
-            payload: pixels
-        )
-        transferTerminalDirtyRange(to: view)
-        let before = renderer.debugBuildSnapshot(scale: 1)
-        let beforeGeneration = view.terminal.kittyGraphicsState.mutationGeneration
-        renderer.debugResetMetrics()
+        view.feed(text: kitty("a=t,f=32,s=2,v=2,t=d,i=42,q=2", payload: pixels))
+        let before = try #require(await harness.frame())
+        view.withTerminal { $0.clearUpdateRange() }
 
         // The image lookup updates only its LRU access tick before the invalid
-        // parent makes display fail. Access-tick bookkeeping must not advance the
-        // render generation, so cached rows stay reusable.
-        sendKitty(
-            terminal: view.terminal,
-            control: "a=p,i=42,p=21,P=999,Q=999,q=2"
-        )
+        // parent makes display fail.
+        view.feed(text: kitty("a=p,i=42,p=21,P=999,Q=999,q=2"))
+        let (terminalDirty, placementsEmpty) = view.withTerminal { terminal in
+            (terminal.getUpdateRange(), terminal.kittyGraphicsState.placementsByKey.isEmpty)
+        }
+        let after = try #require(await harness.frame())
+        let truth = try #require(await harness.freshFrame())
 
-        let terminalDirty = view.terminal.getUpdateRange()
-        let afterGeneration = view.terminal.kittyGraphicsState.mutationGeneration
-        let after = renderer.debugBuildSnapshot(scale: 1)
-        let metrics = renderer.debugMetricsSnapshot()
-        let forced = renderer.debugBuildSnapshot(scale: 1, forceFullRebuild: true)
-
-        print(
-            "VERIFY4_KITTY_REJECTED_PUT outputEqual=\(before == after) " +
-            "forcedEqual=\(after == forced) generation=\(beforeGeneration)->\(afterGeneration) " +
-            "placements=\(view.terminal.kittyGraphicsState.placementsByKey.count) " +
-            "terminalDirty=\(String(describing: terminalDirty)) " +
-            "rowsRebuilt=\(metrics.rowsRebuilt) rowsCached=\(metrics.rowsCached) " +
-            "dirtyRows=\(metrics.dirtyRowsRequested) " +
-            "signatureInvalidations=\(metrics.signatureInvalidations)"
-        )
-
-        #expect(before == after)
-        #expect(after == forced)
-        #expect(afterGeneration == beforeGeneration)
-        #expect(view.terminal.kittyGraphicsState.placementsByKey.isEmpty)
+        #expect(placementsEmpty)
         #expect(terminalDirty == nil)
-        #expect(metrics.rowsRebuilt == 0)
-        #expect(metrics.rowsCached == 12)
-        #expect(metrics.dirtyRowsRequested == 0)
-        #expect(metrics.signatureInvalidations == 0)
+        #expect(after.rows == before.rows)
+        #expect(after.pixels == before.pixels)
+        #expect(after.rebuilt == 0)
+        #expect(after.cached == visibleRows(harness))
+        #expect(after.pixels == truth.pixels)
     }
 
     @Test func defaultFontSetterStillSoftResetsTerminalModes() {
         let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
-        view.resize(cols: 40, rows: 12)
-        view.terminal.feed(text: "\u{1b}[?1h\u{1b}[?6h\u{1b}[?25l\u{1b}[4h")
+        view.resize(cols: 40, rows: Self.rows)
+        view.feed(text: "\u{1b}[?1h\u{1b}[?6h\u{1b}[?25l\u{1b}[4h")
         let before = terminalModeSummary(view)
 
         view.font = NSFont.monospacedSystemFont(ofSize: view.font.pointSize, weight: .regular)
         let after = terminalModeSummary(view)
 
-        print("VERIFY4_DEFAULT_FONT_RESET before=\(before) after=\(after)")
-
         #expect(before == "appCursor=true origin=true hidden=true insert=true")
         #expect(after == "appCursor=false origin=false hidden=false insert=false")
     }
 
-    private func makeDebugHarness() -> (TerminalView, MetalTerminalRenderer) {
-        let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
-        view.resize(cols: 40, rows: 12)
-        view.terminal.changeScrollback(200)
-        view.frame.size = CGSize(width: view.cellDimension.width * 40,
-                                 height: view.cellDimension.height * 12)
-        let renderer = MetalTerminalRenderer(debugTerminalView: view)
-        view.metalRenderer = renderer
-        return (view, renderer)
-    }
-
-    private func sendKitty(terminal: Terminal, control: String, payload: [UInt8]? = nil) {
-        let sequence: String
-        if let payload {
-            sequence = "\u{1b}_G\(control);\(Data(payload).base64EncodedString())\u{1b}\\"
-        } else {
-            sequence = "\u{1b}_G\(control)\u{1b}\\"
-        }
-        terminal.feed(text: sequence)
-    }
-
-    private func transferTerminalDirtyRange(to view: TerminalView) {
-        let terminal = view.terminal!
-        guard let (rowStart, rowEnd) = terminal.getUpdateRange() else {
-            view.setMetalDirtyRange(nil)
-            return
-        }
-        let buffer = terminal.displayBuffer
-        let maxRow = buffer.lines.count - 1
-        let start = max(0, min(buffer.yDisp + rowStart, maxRow))
-        let end = max(0, min(buffer.yDisp + rowEnd, maxRow))
-        view.setMetalDirtyRange(start <= end ? start...end : nil)
-        terminal.clearUpdateRange()
-    }
-
     private func terminalModeSummary(_ view: TerminalView) -> String {
-        let terminal = view.terminal!
-        return "appCursor=\(terminal.applicationCursor) origin=\(terminal.originMode) " +
-            "hidden=\(terminal.cursorHidden) insert=\(terminal.insertMode)"
+        view.withTerminal { terminal in
+            "appCursor=\(terminal.applicationCursor) origin=\(terminal.originMode) " +
+                "hidden=\(terminal.cursorHidden) insert=\(terminal.insertMode)"
+        }
     }
 }
 #endif

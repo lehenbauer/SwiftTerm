@@ -5,10 +5,13 @@
 //  Search integration for TerminalView.
 //
 
+#if !SWIFTTERM_EMBEDDED
 #if os(macOS) || os(iOS) || os(visionOS)
 import Foundation
 
 extension TerminalView {
+    /// Search and selection state are guarded by `terminal.terminalLock`;
+    /// public entry points acquire it before touching that state.
     /// Finds the next match for `term`, selects it, and optionally scrolls it into view.
     /// - Parameters:
     ///   - term: The search term.
@@ -17,16 +20,23 @@ extension TerminalView {
     /// - Returns: `true` if a match was found.
     @discardableResult
     public func findNext (_ term: String, options: SearchOptions = SearchOptions(), scrollToResult: Bool = true) -> Bool {
-        guard let search = search, let selection = selection else {
-            return false
-        }
+        let resultRow: Int? = withTerminal { _ in
+            guard let search = search, let selection = selection else {
+                return nil
+            }
 
-        search.updateLastSelection(currentSearchSelection(selection))
-        if let result = search.findNext(term: term, options: options) {
-            return applySearchResult(result, selection: selection, scrollToResult: scrollToResult)
-        }
+            search.updateLastSelection(currentSearchSelection(selection))
+            if let result = search.findNext(term: term, options: options) {
+                return applySearchResultLocked(result, selection: selection)
+            }
 
-        selection.selectNone()
+            selection.selectNone()
+            return nil
+        }
+        if let resultRow {
+            revealSearchResult(row: resultRow, scrollToResult: scrollToResult)
+            return true
+        }
         return false
     }
 
@@ -38,16 +48,23 @@ extension TerminalView {
     /// - Returns: `true` if a match was found.
     @discardableResult
     public func findPrevious (_ term: String, options: SearchOptions = SearchOptions(), scrollToResult: Bool = true) -> Bool {
-        guard let search = search, let selection = selection else {
-            return false
-        }
+        let resultRow: Int? = withTerminal { _ in
+            guard let search = search, let selection = selection else {
+                return nil
+            }
 
-        search.updateLastSelection(currentSearchSelection(selection))
-        if let result = search.findPrevious(term: term, options: options) {
-            return applySearchResult(result, selection: selection, scrollToResult: scrollToResult)
-        }
+            search.updateLastSelection(currentSearchSelection(selection))
+            if let result = search.findPrevious(term: term, options: options) {
+                return applySearchResultLocked(result, selection: selection)
+            }
 
-        selection.selectNone()
+            selection.selectNone()
+            return nil
+        }
+        if let resultRow {
+            revealSearchResult(row: resultRow, scrollToResult: scrollToResult)
+            return true
+        }
         return false
     }
 
@@ -65,34 +82,41 @@ extension TerminalView {
         wraps: Bool = true,
         clearSelectionOnMiss: Bool = true
     ) -> Bool {
-        guard let search = search, let selection = selection else {
-            return false
-        }
+        let resultRow: Int? = withTerminal { terminal in
+            guard let search = search, let selection = selection else {
+                return nil
+            }
 
-        let currentSelection = currentSearchSelection(selection)
-        let result: SearchResult?
-        if search.canContinueSearch(
-            term: term,
-            options: options,
-            selection: currentSelection,
-            viewportYDisp: terminal.displayBuffer.yDisp
-        ) {
-            search.updateLastSelection(currentSelection)
-            result = search.findPrevious(term: term, options: options, wraps: wraps)
-        } else {
-            result = search.findPreviousBeforeRow(
+            let currentSelection = currentSearchSelection(selection)
+            let result: SearchResult?
+            if search.canContinueSearch(
                 term: term,
                 options: options,
-                beforeRow: terminal.displayBuffer.yDisp
-            )
-        }
+                selection: currentSelection,
+                viewportYDisp: terminal.displayBuffer.yDisp
+            ) {
+                search.updateLastSelection(currentSelection)
+                result = search.findPrevious(term: term, options: options, wraps: wraps)
+            } else {
+                result = search.findPreviousBeforeRow(
+                    term: term,
+                    options: options,
+                    beforeRow: terminal.displayBuffer.yDisp
+                )
+            }
 
-        if let result {
-            return applySearchResult(result, selection: selection, scrollToResult: scrollToResult)
-        }
+            if let result {
+                return applySearchResultLocked(result, selection: selection)
+            }
 
-        if clearSelectionOnMiss {
-            selection.selectNone()
+            if clearSelectionOnMiss {
+                selection.selectNone()
+            }
+            return nil
+        }
+        if let resultRow {
+            revealSearchResult(row: resultRow, scrollToResult: scrollToResult)
+            return true
         }
         return false
     }
@@ -101,34 +125,41 @@ extension TerminalView {
     /// from the existing search result when the current selection is that result.
     @discardableResult
     public func findNextFromVisibleBottom (_ term: String, options: SearchOptions = SearchOptions(), scrollToResult: Bool = true) -> Bool {
-        guard let search = search, let selection = selection else {
-            return false
-        }
+        let resultRow: Int? = withTerminal { terminal in
+            guard let search = search, let selection = selection else {
+                return nil
+            }
 
-        let currentSelection = currentSearchSelection(selection)
-        let result: SearchResult?
-        if search.canContinueSearch(
-            term: term,
-            options: options,
-            selection: currentSelection,
-            viewportYDisp: terminal.displayBuffer.yDisp
-        ) {
-            search.updateLastSelection(currentSelection)
-            result = search.findNext(term: term, options: options)
-        } else {
-            let displayBuffer = terminal.displayBuffer
-            result = search.findNextAfterRow(
+            let currentSelection = currentSearchSelection(selection)
+            let result: SearchResult?
+            if search.canContinueSearch(
                 term: term,
                 options: options,
-                afterRow: displayBuffer.yDisp + displayBuffer.rows - 1
-            )
-        }
+                selection: currentSelection,
+                viewportYDisp: terminal.displayBuffer.yDisp
+            ) {
+                search.updateLastSelection(currentSelection)
+                result = search.findNext(term: term, options: options)
+            } else {
+                let displayBuffer = terminal.displayBuffer
+                result = search.findNextAfterRow(
+                    term: term,
+                    options: options,
+                    afterRow: displayBuffer.yDisp + displayBuffer.rows - 1
+                )
+            }
 
-        if let result {
-            return applySearchResult(result, selection: selection, scrollToResult: scrollToResult)
-        }
+            if let result {
+                return applySearchResultLocked(result, selection: selection)
+            }
 
-        selection.selectNone()
+            selection.selectNone()
+            return nil
+        }
+        if let resultRow {
+            revealSearchResult(row: resultRow, scrollToResult: scrollToResult)
+            return true
+        }
         return false
     }
 
@@ -137,35 +168,48 @@ extension TerminalView {
     /// `index` (0 when there is no current match) and the `total` match count
     /// (capped at `limit`). Drives a "2/14" style counter in a search UI.
     public func searchMatchSummary (_ term: String, options: SearchOptions = SearchOptions(), limit: Int = 1000) -> (index: Int, total: Int) {
-        guard let search = search else {
-            return (0, 0)
+        withTerminal { _ in
+            guard let search = search else {
+                return (0, 0)
+            }
+            let all = search.findAll(term: term, options: options, limit: limit)
+            guard let last = search.lastResult,
+                  let i = all.firstIndex(where: { $0.row == last.row && $0.col == last.col }) else {
+                return (0, all.count)
+            }
+            return (i + 1, all.count)
         }
-        let all = search.findAll(term: term, options: options, limit: limit)
-        guard let last = search.lastResult,
-              let i = all.firstIndex(where: { $0.row == last.row && $0.col == last.col }) else {
-            return (0, all.count)
-        }
-        return (i + 1, all.count)
     }
 
     /// Clears the current search state and selection.
     public func clearSearch () {
-        search?.reset()
-        selection?.selectNone()
+        withTerminal { _ in
+            search?.reset()
+            selection?.selectNone()
+        }
     }
 
-    private func applySearchResult (_ result: SearchResult, selection: SelectionService, scrollToResult: Bool) -> Bool {
+    private func applySearchResultLocked (_ result: SearchResult, selection: SelectionService) -> Int {
+        terminal.terminalLock.preconditionLocked()
         let range = search?.selectionRange(for: result) ?? (start: Position(col: result.col, row: result.row),
                                                            end: Position(col: result.col, row: result.row))
         selection.setSelection(start: range.start, end: range.end)
+        return result.row
+    }
+
+    /// Scrolls a selected result into view, then records the viewport it was
+    /// left in so a later manual scroll restarts viewport-anchored search.
+    private func revealSearchResult (row: Int, scrollToResult: Bool) {
         if scrollToResult {
-            scrollToReveal(row: result.row)
+            scrollToReveal(row: row)
         }
-        search?.updateLastResultViewport(yDisp: terminal.displayBuffer.yDisp)
-        return true
+        withTerminal { terminal in
+            search?.updateLastResultViewport(yDisp: terminal.displayBuffer.yDisp)
+        }
     }
 
     private func currentSearchSelection (_ selection: SelectionService) -> SearchSelection? {
+        terminal.terminalLock.preconditionLocked()
         guard selection.active else {
             return nil
         }
@@ -180,30 +224,37 @@ extension TerminalView {
     }
 
     private func scrollToReveal (row: Int) {
-        let displayBuffer = terminal.displayBuffer
-        let rows = displayBuffer.rows
-        guard rows > 0 else {
-            return
-        }
-        if terminal.isDisplayBufferAlternate {
-            return
-        }
+        let target: Int? = withTerminal { terminal in
+            let displayBuffer = terminal.displayBuffer
+            let rows = displayBuffer.rows
+            guard rows > 0 else {
+                return nil
+            }
+            if terminal.isDisplayBufferAlternate {
+                return nil
+            }
 
-        let upperVisible = displayBuffer.yDisp
-        let lowerVisible = displayBuffer.yDisp + rows - 1
-        if row >= upperVisible && row <= lowerVisible {
-            return
-        }
+            let upperVisible = displayBuffer.yDisp
+            let lowerVisible = displayBuffer.yDisp + rows - 1
+            if row >= upperVisible && row <= lowerVisible {
+                return nil
+            }
 
-        let maxScrollback = max(0, displayBuffer.lines.count - rows)
-        var target = row - rows / 2
-        if target < 0 {
-            target = 0
+            let maxScrollback = max(0, displayBuffer.lines.count - rows)
+            var target = row - rows / 2
+            if target < 0 {
+                target = 0
+            }
+            if target > maxScrollback {
+                target = maxScrollback
+            }
+            return target
         }
-        if target > maxScrollback {
-            target = maxScrollback
+        if let target {
+            scrollTo(row: target)
         }
-        scrollTo(row: target)
     }
 }
 #endif
+
+#endif // !SWIFTTERM_EMBEDDED

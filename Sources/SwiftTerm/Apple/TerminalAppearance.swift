@@ -148,7 +148,7 @@ extension TerminalView {
         // UIKit keeps the default background on the layer. Replace the saved
         // normal color too, so leaving DECSCNM restores this theme, not the old one.
         layer.backgroundColor = theme.background.cgColor
-        if terminal.reverseColors {
+        if reverseColorsActiveValue() {
             reverseColorsSavedLayerBackground = theme.background.cgColor
         }
         #endif
@@ -169,7 +169,7 @@ extension TerminalView {
         // Set the strategy onto options directly so installColors performs a
         // single palette rebuild instead of two (the public setter on Terminal
         // would also trigger a rebuild on its own).
-        terminal.options.ansi256PaletteStrategy = theme.ansi256Strategy
+        withTerminal { $0.options.ansi256PaletteStrategy = theme.ansi256Strategy }
         installColors(theme.ansi16)
         // installColors invokes colorsChanged(); the other property setters
         // above don't, but the cache flush from installColors covers them.

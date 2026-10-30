@@ -193,9 +193,9 @@ struct Upstream119ClearScrollbackViewTests {
     @Test func clearingHistoryWhileScrolledBackResumesFollowingOutput() {
         let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 320, height: 100))
         view.resize(cols: 16, rows: 3)
-        view.getTerminal().changeScrollback(20)
+        view.changeScrollback(20)
         view.feed(text: (0..<10).map { "row \($0)" }.joined(separator: "\r\n"))
-        let terminal = view.getTerminal()
+        let terminal: Terminal = view.terminal
         let liveScreen = TerminalTestHarness.visibleLinesText(buffer: terminal.buffer, terminal: terminal)
         view.scrollUp(lines: 2)
         #expect(view.userScrolling && terminal.userScrolling)
@@ -233,8 +233,8 @@ struct Upstream119ClearScrollbackIOSTests {
         view.contentInsetAdjustmentBehavior = .never
         let cellHeight = view.cellDimension.height
         view.frame.size.height = 50 * cellHeight
-        let terminal = view.getTerminal()
-        terminal.feed(text: (0..<150).map { "existing \($0)" }.joined(separator: "\r\n"))
+        let terminal: Terminal = view.terminal
+        view.feed(text: (0..<150).map { "existing \($0)" }.joined(separator: "\r\n"))
         view.updateScroller()
 
         view.simulatedTracking = true
@@ -251,7 +251,7 @@ struct Upstream119ClearScrollbackIOSTests {
         #expect(!terminal.userScrolling)
         #expect(terminal.buffer.yDisp == terminal.buffer.yBase)
 
-        terminal.feed(text: (0..<60).map { "\r\nout \($0)" }.joined())
+        view.feed(text: (0..<60).map { "\r\nout \($0)" }.joined())
         view.updateScroller()
         #expect(terminal.buffer.yBase == 60)
         #expect(terminal.buffer.yDisp == terminal.buffer.yBase)

@@ -13,11 +13,7 @@ struct TerminfoCompatibilityTests {
     }
 
     private func swiftTermFixtureURL() throws -> URL {
-        try #require(
-            Bundle.module.url(forResource: "swifterm-terminfo", withExtension: "infocmp")
-                ?? Bundle.module.url(forResource: "swifterm-terminfo", withExtension: "infocmp",
-                                     subdirectory: "Fixtures")
-        )
+        try TerminfoFixture.fixtureURL()
     }
 
     private func fixtureCapabilities() throws -> (names: [String], values: [String: String]) {
@@ -47,7 +43,13 @@ struct TerminfoCompatibilityTests {
         let fixtureLines = fixtureText.split(whereSeparator: \.isNewline)
 
         #expect(swiftTermLines[1] == "swifterm-terminfo,")
-        #expect(swiftTermLines.dropFirst(2).elementsEqual(fixtureLines.dropFirst(2)))
+        // Pst is a SwiftTerm addition. All shared capabilities must still
+        // match the fixed Ghostty entry, including their values and order.
+        let programStatusCapability = "\tPst=\\E]7501;%p1%s\\E\\\\,"
+        let capabilities = swiftTermLines.dropFirst(2)
+        #expect(capabilities.filter { $0 == programStatusCapability }.count == 1)
+        #expect(capabilities.filter { $0 != programStatusCapability }
+            .elementsEqual(fixtureLines.dropFirst(2)))
     }
 
     @Test func fixedGhosttyEntryCountsAndNames() throws {

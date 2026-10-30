@@ -1,45 +1,73 @@
+//
+//  LineInfoCacheTests.swift
+//
+//  The fork's CG line-info cache (`47a3079`) is superseded on v1.99.2 by the
+//  frame snapshot, which copies a row only when its source line or generation
+//  changed, and the snapshot text builder. These tests keep the fork's two
+//  observable contracts on that seam: a row's rendering follows its line's
+//  generation, and invalidating one row leaves the other rows' copies alone.
+//
 import Foundation
 import Testing
 
 @testable import SwiftTerm
 
 #if os(macOS)
+@MainActor
 final class LineInfoCacheTests {
+    private func refresh(_ snapshot: TerminalSnapshot, _ view: TerminalView) {
+        let viewState = FrameViewState(view: view)
+        view.withTerminal { terminal in
+            _ = snapshot.refresh(terminal: terminal, viewState: viewState,
+                                 selection: SnapshotSelectionState(selection: view.selection))
+        }
+    }
+
+    private func renderedText(_ snapshot: TerminalSnapshot, _ view: TerminalView, row: Int) -> String {
+        let context = SnapshotRenderContext(viewState: FrameViewState(view: view), snapshot: snapshot)
+        let info = view.textBuilder.buildAttributedString(row: snapshot.rows[row - snapshot.firstRow],
+                                                          absoluteRow: row, context: context)
+        return info.segments.map { $0.attributedString.string }.joined()
+            .trimmingCharacters(in: .whitespaces)
+    }
+
     @Test func testCachedLineInfoTracksBufferLineGeneration() {
         let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 240, height: 80))
         view.resize(cols: 10, rows: 3)
-        let terminal = view.getTerminal()
+        let snapshot = TerminalSnapshot()
 
-        terminal.feed(text: "abc")
-        let line = terminal.displayBuffer.lines[0]
-        _ = view.cachedLineInfo(row: 0, line: line, cols: terminal.cols)
-        let firstGeneration = view.lineInfoCache[0]?.generation
+        view.feed(text: "abc")
+        refresh(snapshot, view)
+        #expect(renderedText(snapshot, view, row: 0) == "abc")
 
-        _ = view.cachedLineInfo(row: 0, line: line, cols: terminal.cols)
-        #expect(view.lineInfoCache.count == 1)
-        #expect(view.lineInfoCache[0]?.generation == firstGeneration)
+        // Unchanged line: nothing is copied again.
+        refresh(snapshot, view)
+        #expect(snapshot.rowsCopied == 0)
+        #expect(renderedText(snapshot, view, row: 0) == "abc")
 
-        terminal.feed(text: "d")
-        _ = view.cachedLineInfo(row: 0, line: line, cols: terminal.cols)
-        #expect(view.lineInfoCache[0]?.generation == line.generation)
-        #expect(view.lineInfoCache[0]?.generation != firstGeneration)
+        // A new generation of the same line: that row is copied again.
+        view.feed(text: "d")
+        refresh(snapshot, view)
+        #expect(snapshot.rowsCopied == 1)
+        #expect(renderedText(snapshot, view, row: 0) == "abcd")
     }
 
     @Test func testInvalidatingOneLineInfoRowKeepsOtherRows() {
         let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 240, height: 80))
         view.resize(cols: 10, rows: 3)
-        let terminal = view.getTerminal()
+        let snapshot = TerminalSnapshot()
 
-        terminal.feed(text: "abc\r\nxyz")
-        let firstLine = terminal.displayBuffer.lines[0]
-        let secondLine = terminal.displayBuffer.lines[1]
-        _ = view.cachedLineInfo(row: 0, line: firstLine, cols: terminal.cols)
-        _ = view.cachedLineInfo(row: 1, line: secondLine, cols: terminal.cols)
+        view.feed(text: "abc\r\nxyz")
+        refresh(snapshot, view)
 
-        view.invalidateLineInfoCache(row: 0)
+        // Change only row 0.
+        view.feed(text: "\u{1b}[1;4HQ")
+        refresh(snapshot, view)
 
-        #expect(view.lineInfoCache[0] == nil)
-        #expect(view.lineInfoCache[1] != nil)
+        #expect(snapshot.rowsCopied == 1)
+        #expect(snapshot.rowsSkipped == 2)
+        #expect(renderedText(snapshot, view, row: 0) == "abcQ")
+        #expect(renderedText(snapshot, view, row: 1) == "xyz")
     }
 }
 #endif
