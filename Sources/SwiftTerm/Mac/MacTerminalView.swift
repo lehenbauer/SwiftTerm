@@ -24,15 +24,30 @@ import os.log
 #endif
 
 /// Reports the full duration of knob tracking to the terminal view.
+///
+/// AppKit keeps an `NSScroller` subclass that overrides drawing on the legacy
+/// style (`isCompatibleWithOverlayScrollers` is false), so this scroller's own
+/// `scrollerStyle` is `.legacy` in both modes. The terminal view sets
+/// `drawsLegacyStyle` from its own style instead.
 private final class TerminalScroller: NSScroller {
     var trackingChanged: ((Bool) -> Void)?
 
+    /// True when the terminal shows this scroller as a legacy scroll bar. In
+    /// overlay mode it is a transparent hit target and paints nothing.
+    var drawsLegacyStyle = false {
+        didSet {
+            if drawsLegacyStyle != oldValue {
+                needsDisplay = true
+            }
+        }
+    }
+
     override var isOpaque: Bool {
-        scrollerStyle == .legacy && super.isOpaque
+        drawsLegacyStyle && super.isOpaque
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        if scrollerStyle == .legacy {
+        if drawsLegacyStyle {
             super.draw(dirtyRect)
         }
     }
@@ -1691,6 +1706,7 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
         didSet {
             guard oldValue != scrollerStyle || scroller?.scrollerStyle != scrollerStyle else { return }
             scroller?.scrollerStyle = scrollerStyle
+            (scroller as? TerminalScroller)?.drawsLegacyStyle = scrollerStyle == .legacy
             if let scroller {
                 scroller.controlSize = scrollerControlSize
                 let width = NSScroller.scrollerWidth(
@@ -1792,6 +1808,7 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
             ])
         }
         scroller.scrollerStyle = scrollerStyle
+        (scroller as? TerminalScroller)?.drawsLegacyStyle = scrollerStyle == .legacy
         scroller.controlSize = scrollerControlSize
         scroller.alphaValue = scrollerStyle == .overlay ? 0 : 1
         scroller.isHidden = scrollerStyle == .overlay

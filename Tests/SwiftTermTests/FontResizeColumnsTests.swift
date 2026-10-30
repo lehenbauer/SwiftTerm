@@ -70,6 +70,35 @@ struct FontResizeColumnsTests {
         #expect(indicator?.isHidden == true)
     }
 
+    /// AppKit keeps the drawing `NSScroller` subclass on the legacy style, so
+    /// the transparent overlay hit target must not paint legacy chrome under
+    /// the indicator whenever it is invalidated.
+    @Test func testOverlayHitTargetPaintsNothing() throws {
+        func paintedPixels(_ style: NSScroller.Style) throws -> Int {
+            let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 400, height: 200))
+            view.followsSystemScrollerStyle = false
+            view.scrollerStyle = style
+            view.layoutSubtreeIfNeeded()
+            let scroller = try #require(view.subviews.compactMap { $0 as? NSScroller }.first)
+            view.applyScrollerState(.init(isEnabled: true, doubleValue: 0.5, knobProportion: 0.2))
+            let rep = try #require(scroller.bitmapImageRepForCachingDisplay(in: scroller.bounds))
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+            scroller.draw(scroller.bounds)
+            NSGraphicsContext.restoreGraphicsState()
+            var painted = 0
+            for x in 0..<rep.pixelsWide {
+                for y in 0..<rep.pixelsHigh where (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0 {
+                    painted += 1
+                }
+            }
+            return painted
+        }
+
+        #expect(try paintedPixels(.legacy) > 0)
+        #expect(try paintedPixels(.overlay) == 0)
+    }
+
     @Test func testScrollerUsesTerminalScrollPositionDirectly() {
         let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 400, height: 200))
         let scroller = view.subviews.compactMap { $0 as? NSScroller }.first
