@@ -178,3 +178,20 @@ Evidence and root adjudication are retained in the Whisp sibling's
 Publication and the four Whisp pins follow this source qualification; ordinary
 remote-resolved downstream builds must still pass. These final sections
 supersede earlier pending/HOLD descriptions above without erasing their history.
+
+## Downstream completion
+
+Published pin `365bb5135272e051f3a54c9ebf300a7ba4007b91` is adopted in Whisp
+feature commit `ddbfe3ab58eb8f26d2afecdd1e11f63ebdc20a9e`. Fresh remote identity,
+ordinary Mac/iOS builds, literal vision-build-check, default dependency identity
+70/70 and SidebarNativeProbe 4/4 pass. Sources/Tests/manifests match the qualified
+45b58d4 candidate. Both implementation worktrees are retained; neither main was
+merged, and no app/helper or device was activated. No further source work remains
+for this bounded adoption. Manual visual/physical-input and live-use acceptance
+remain separate.
+
+Final evidence: Whisp sibling
+`docs/agent_memory/handoffs/2026-10-30-swiftterm-v1992/README.md` and
+`resume/REPORT-pin-final.md` beneath that directory. The final documentation-only
+successor to 365bb51 does not require another downstream pin change; preserve
+365bb51's reachability on this branch.
