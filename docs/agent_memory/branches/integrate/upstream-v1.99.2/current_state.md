@@ -110,27 +110,40 @@ view feed overloads and checked LocalProcess byte/borrowed feeds use the policy.
   - The Mac observer `deinit` cleanup is verified by compile and suite only.
   - Hosted XCTest `WhispMacClipboardTests` was not run (it launches the app).
 
-## Final disposition (2026-10-30)
+## Disposition (2026-10-30, resumed)
 
-HOLD. The user explicitly prohibits merging either repository to main and says
-to wait if slower. No source push, main integration, product pin advance or
-activation occurred. The qualified source remains060f8a4 (Sources tree
-64c5b012673efcfe8d89396793259d51c68cfabc); this closing update is documentation only.
+SOURCE-QUALIFIED; downstream and performance gates pending. The user accepts
+proceeding despite the bounded scrollback CPU tradeoff and wants no further
+performance work. No merge to either main, no push from the worker, no pin
+advance or activation.
 
-Exact clean-source Whisp Mac/iOS/Vision builds and native fixtures pass. The
-060f8a4 history benchmark regresses main CPU by77% versus shipping674ad88, with
-a21.87ms worst iteration. The separate experimental branch
-`experiment/scrollbar-frame-coalescing-v1992` in
-`/Users/karl/src/SwiftTerm-scrollbar-v1992` fixes legacy chrome drawn by the
-transparent overlay target (49595b0) and redundant indicator repaint (4d68c80).
-Its316 Swift Testing +28 total XCTest pass, and3quietpaired timing runs eliminate
-over-frame stalls in the workload but still cost529ms vs440ms main CPU (+20.2%).
-Every candidate run exceeds every baseline run. Bulk feed is about89% faster
-but does not waive the user's scrollback CPU gate. No further optimization or
-full12-workload final pair was authorized after this result. Experimental fixes
-remain separate and lack full-suite/app/visual qualification.
+- The overlay scroller fixes from `experiment/scrollbar-frame-coalescing-v1992`
+  are cherry-picked unchanged: `ee78a76` (from 49595b0, the overlay hit target
+  paints no legacy chrome) and `7e49e98` (from 4d68c80, the knob repaints in the
+  display pass only when it moves). Sources tree
+  `17e363d44171c92b7c6b6047a8c36f807a6a0a20` is identical to 4d68c80.
+  The change is Mac-only: `MacTerminalView.swift` sits under `#if os(macOS)`,
+  and so do the tests (`FontResizeColumnsTests.swift`).
+- Full Mac: `swift build` and `swift test --no-parallel` exit 0. 2105 Swift
+  Testing tests in 205 suites (31 environment-gated skips) plus 146 XCTest.
+  Logs: Whisp shared dir `.../resume/fq-full-test.log`.
+- iOS (`echo-ios-test.log`) and Vision (`echo-vision.log`) results at 060f8a4
+  are reused, because the delta compiles out on those platforms. They were not
+  rerun on this tree.
+- Timing, from the experimental branch at an identical Sources tree:
+  - over-frame stalls are gone in the history workload;
+  - main CPU is still +20.2% versus shipping 674ad88 (529 vs 440 ms);
+  - accepted by the user, not fixed;
+  - no full 12-workload pair was run.
+- Still unverified by hand:
+  - knob-drag smoothness;
+  - overlay reveal and fade;
+  - repaint on a runtime switch between legacy and overlay;
+  - light/dark knob color.
+- Still pending: the coordinator publishes the exact revision, then the
+  downstream re-pin and its gates run.
 
-Durable closeout and archived benchmark source/receipts:
+Earlier HOLD record at 060f8a4 (history benchmark +77% main CPU, 21.87ms worst
+iteration) and archived receipts:
 `/Users/karl/src/ai-whisperer-feature-swiftterm-v1.99.2/docs/agent_memory/handoffs/2026-10-30-swiftterm-v1992/README.md`.
-All workers retired; dedicated iOS simulator shut down. Retain worktrees and
-artifacts. Primary-checkout dirty files remain byte-for-byte unchanged.
+Retain worktrees and artifacts.
