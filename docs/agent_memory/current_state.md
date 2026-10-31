@@ -1,56 +1,55 @@
 # Current State
 
-Bounded snapshot of what is true now. History and narrative live in
-`handoffs/`; constraints in `decisions.md`.
+Bounded snapshot of main. Detailed evidence lives in `handoffs/`; durable
+constraints live in `decisions.md`.
 
 ## Branches and pins
 
-- `main` includes adopted upstream v1.19.0, Mac selection `5e91b9e`, and wrapped scrollback retention `674ad88`. Exact downstream pin remains `674ad8896e9c7afa80b3fa531dfa46213eecf1b0`; later closeout changes are documentation only.
-- v1.19.0 adoption is complete and published; no runtime deployment/relaunch; human visual and physical-keyboard acceptance unclaimed — `handoffs/2026-09-29-upstream-v1.19.0-adoption.md`.
-- Whisp integration qualifies all four pins at `674ad88`: Mac/iOS Simulator/visionOS builds pass with checkout revision and Terminal.swift hash verified; full Whisp support/backend suites pass. Karl confirmed rebuilt iPad Real Cello scrolls all the way to the top; reported cutoff field accepted — `handoffs/2026-10-18-scrollback-wrap.md`.
-- A v1.19 re-pin requires Whisp's OSC 133 mirror override (ai-whisperer `77b1d871`, branch `probe/swiftterm-v1.19.0`) — `handoffs/2026-09-29-upstream-v1.19.0.md`.
-- Upstream v1.19.0 is `464df52` (merged at `f17a40f`); the prior sync was `cf7764f` (via `affe8412`) — `handoffs/2026-08-08-upstream-sync-cf7764f.md`.
+- Main adopts released upstream v1.99.2 (`a183c15`) through fork merge e12887a,
+  echo repair060f8a4 and overlay repairs ee78a76/7e49e98. Whisp's exact pin is
+  `365bb5135272e051f3a54c9ebf300a7ba4007b91`; later changes are documentation only.
+- Qualified Sources17e363d44171c92b7c6b6047a8c36f807a6a0a20 and
+  Tests18f043fc11341a2c754560fc7a3ab344c8dd315e are unchanged for main adoption.
+- The user accepted the live Whisp worktree build and explicitly approved main
+  integration. Preserve that running worktree; no additional relaunch or release.
+- Evidence: `handoffs/2026-10-30-upstream-v1.99.2/README.md`, plus the Whisp
+  sibling's `docs/agent_memory/handoffs/2026-10-30-swiftterm-v1992/`.
 
-## v1.19.0 adoption (`85cb8ca`, published)
+## Executed qualification
 
-- Frozen qualification: `swift build` + `swift test --no-parallel` green on M5 Max Metal (865 tests/80 suites + 85 XCTest); iOS six filtered suites and TerminalApp CG/Metal 43/43 pass; Whisp `77b1d871` builds for macOS/iOS Sim/visionOS Sim — `handoffs/2026-09-29-upstream-v1.19.0.md`.
-- No human visual, physical-keyboard or framebuffer acceptance has been done; Metal evidence is draw data/state only.
-- Headless ASCII feed p50 is +9.3–10.3% vs `2747875`, mostly OSC 133 semantic row bookkeeping; accepted by the adoption decision, not fixed; diagnostic ablations cannot ship.
-- Metal `arabic-line` RenderBench feed ticks drop ~39% from the release merge; that is feed cost (+24% per tick) plus more successful draw builds, not a measured rendering or presented-frame slowdown. Not an adoption priority (Metal disabled in Whisp; CG near baseline).
-- Long headless Arabic control: initial merge +35.7% feed time vs main, overlapping pure release; upstream ranges d90963a..1052996 (+12.1%) and 1052996..464df52 (+21.1%) account for material cost, not individually bisected — `handoffs/2026-09-29-upstream-v1.19.0.md`.
-- Clear-history on `85cb8ca` keeps absolute row identities, saved cursor, image counts and follow state; captured-history OSC 133 metadata is not imported.
-- Next upstream pickup: stable released tag after v1.19.0 only (v1.20.0 is a pre-release); upstream `6ea9082` targets the measured weak-owner cost; do not move Whisp feed off main on v1.19 — `handoffs/2026-09-29-upstream-v1.19.0-adoption.md`.
+- Full Mac swift build/test:2105 Swift Testing +146 XCTest pass,31 existing skips.
+- UIKit1062+57 and Vision library build pass at060f8a4; later Mac-only delta
+  permits reuse. Fourth echo wiring test separately passes on Mac/UIKit.
+- Whisp exact remote pin: Mac/iOS/Vision builds, literal vision-build-check,
+  native selection/identity70, paste26, scroll10, cursor11, replay10, file-drop
+  and fonts pass. Full backend/support results and reuse are in Whisp's handoff.
+- Final CG comparison:24 correctness,24 warm-ups,72 retained timing cells pass.
+  Bulk main CPU improves71–90%; history costs+0.29ms/step (+38.9% in that session),
+  steady-view CPU+1.3–9ms/s. Accepted tradeoffs, not eliminated regressions.
+- General live Whisp use accepted by the user; no exhaustive physical/device,
+  many-pane, heavy-build,120Hz,battery or Metal field qualification is claimed.
 
-## Wrapped history capture (`674ad88`)
+## Current contracts
 
-- Bounded one-row scratch history retains physical wrapped rows; default implicit padding is capture-only and ordinary BCE/explicit erases stay unchanged. Opus 5.5 accepted the plan revisions, corrected implementation and final fixture gate closure — `handoffs/2026-10-18-scrollback-wrap.md`.
-- Full suite 85 XCTest + 914 Swift Testing, actual iPad simulator 13 UIKit + 16 hydration, private six-width replay and downstream Mac/iOS/Vision gates pass. Test-only MainActor isolation closes the pre-existing repaint fixture race; all prior failures retained. OSC 8 target lifetime/full-capacity redundant fetching remain separate.
+- Terminal state is lock-owned and views expose copied reads/atomic commands;
+  no public raw Terminal escape. Rendering uses upstream snapshots/frame driver.
+- Persistent tmux mirror policy suppresses replay/emulator replies and OSC133,
+  preserves selection, and distinguishes actual user input. Paste and following
+  keys share an ordered delivery FIFO. Whisp feed remains on main, Metal opt-in.
+- Fixed grids reject stale pending view sizes. Capture rows retain physical wrap
+  and rehome arena/payload ownership. History repaint tracks buffer identity,
+  refresh generation and absolute anchor, avoiding live-output history redraws.
+- Native press anchors retain line identity and are consumed once. Cursor/blink
+  and appearance policy are copied into snapshots; cellMetrics owns cell snapping.
+- Interactive echo retains the150ms window with visibility, clock and DEC2026
+  guards; overlay hit-target paint and knob invalidation avoid redundant work.
+- UIKit mirror gestures do not inject local scroll input; mode transitions cancel
+  gesture ownership synchronously. Repeat timers/observers use isolated teardown.
 
-## Renderer contracts (on `main`)
+## History and limitations
 
-- Scrolled-back CG ticks repaint only on explicit signals (buffer identity, `fullRefreshGeneration`, anchor, out-of-live marks, overlap) — `handoffs/2026-08-11-scrollback-repaint-skip.md`.
-- CG caret visibility is owned solely by `updateCursorPosition()`; DECTCEM delegates route through it — `handoffs/2026-08-11-scrollback-caret-flash.md`.
-- Deferred there: partial-rect translation in the overlap case, iOS full-bounds ticks, update-range coordinate normalization.
-- `TerminalView.cellMetrics` is the single owner of cell snapping — `handoffs/2026-08-08-shared-cell-metrics-api.md`.
-- Upstream BiDi bookkeeping costs ~3–4% feed throughput, accepted; a mode-gated fast path is not done — `handoffs/2026-08-08-upstream-sync-cf7764f.md`.
-- Selections translate across `prependScrollbackCapture` (`b2c68bc`) — `handoffs/2026-08-08-upstream-sync-cf7764f.md`.
-
-## Mac selection press anchor (`5e91b9e`, published)
-
-- Native single-click drag anchors at the `mouseDown` cell via a single-use line-identity anchor; 35 regressions, full fork/downstream suites, 70 native Whisp assertions and Mac/iOS/Vision builds pass. Integrated/pushed and Whisp re-pinned; no live app rollout or physical-trackpad acceptance — `handoffs/2026-10-14-mac-selection-anchor.md`.
-- User-requested `AGENTS.md` modernization (`3ebb207`) permits verified autonomous commits/merges/pushes and in-scope pins/upstream integration. Preserve tests, unrelated work and explicit authorization for releases/deployments; follow current guide rather than old ask-first handoff instructions.
-
-## Fork API surfaces (on `main`)
-
-- `Terminal.inspect()` and view `inspectGeometry`/`inspectInputPolicy`/`inspectAll` provide Codable third-witness dumps (`164fb11`).
-- Terminals construct at the resolved `TerminalOptions` grid via `TerminalInitialGeometry`; no provisional 80x25 — `handoffs/2026-07-20-initial-geometry.md`.
-- `autoResizeGrid` (default true) gates bounds-derived grid mutators for Whisp mirrors (`a503a72`); record in `../ai-whisperer/docs/agent_memory/handoffs/2026-07-14-mirror-grid-pin-campaign.md`.
-- DEC 2026 synchronized output is a live-buffer core mode; display blocking is view-layer (see `decisions.md`).
-- Fork line-info caching, Metal cursor-activity visibility and viewport-anchored search are present since the `2026-07-01` origin merge — `handoffs/2026-07-01-origin-main-merge.md`.
-
-## Known limitations
-
-- Kitty shared-memory tests skip: fixture shm name (53 bytes) exceeds Darwin's limit.
-- Default suite counts include no-work cases: 3 optional performance-data tests, 2 esctest cases (suite absent), empty/unavailable fuzzer fixtures.
-- Metal renderer tests need real Metal hardware; headless or simulator runs do not cover them.
-- The 2026-09-29 campaign records a native RenderBench baseline at main `2747875`; compare identical workloads and distinguish feed ticks from presented frames — `handoffs/2026-09-29-upstream-v1.19.0.md`.
+- v1.19 adoption: `handoffs/2026-09-29-upstream-v1.19.0-adoption.md`.
+- Wrapped capture/iPad acceptance: `handoffs/2026-10-18-scrollback-wrap.md`.
+- Mac press anchors: `handoffs/2026-10-14-mac-selection-anchor.md`.
+- Upstream environment-gated suites retain skips; Vision library compile does not
+  establish an xrOS runtime pass. Native bookkeeping does not prove visual tracking.

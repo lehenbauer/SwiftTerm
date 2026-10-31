@@ -1,5 +1,10 @@
 # Decisions
 
+## 2026-10-30
+
+- SwiftTerm v1.99.2 adoption preserves copied snapshot APIs, persistent tmux mirror reply/OSC133 suppression, explicit user-input provenance and ordered paste/key delivery. Whisp feed stays on main and Metal stays opt-in; a later concurrency or renderer change needs separate qualification — `handoffs/2026-10-30-upstream-v1.99.2/README.md`.
+- Keep qualified downstream pin365bb51 reachable from fork main. The user accepted the measured CPU tradeoffs and live Mac worktree, then authorized main integration; this does not authorize releases or imply exhaustive device/energy acceptance.
+
 ## 2026-10-14
 
 - Keep the Mac first-drag press anchor as line identity + `recycleGeneration` + column count, consumed by the first native drag. A bare buffer `Position` selects the wrong text after scrollback trim/history prepend, and a reusable anchor resurrects cancelled selections. Do not invalidate it on linefeed; that reintroduces the bug in streaming panes — `handoffs/2026-10-14-mac-selection-anchor.md`.
