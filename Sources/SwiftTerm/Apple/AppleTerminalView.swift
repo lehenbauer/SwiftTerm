@@ -525,6 +525,7 @@ struct SnapshotSelectionResolver {
 /// Adding a field here is fine. Reading live view state from the preparation
 /// path instead is not: that is the invariant this type exists to hold.
 struct FrameViewState: Sendable {
+    let fillsExtraViewportFromHistory: Bool
     let cursorRenderingPolicy: CursorRenderingPolicy
     // What TerminalSnapshot.refresh reads.
     let linkHighlightRange: [Terminal.LinkMatch.RowRange]?
@@ -572,6 +573,11 @@ struct FrameViewState: Sendable {
 
     @MainActor
     init (view: TerminalView) {
+        #if os(iOS) || os(visionOS)
+        fillsExtraViewportFromHistory = !view.autoResizeGrid && view.fillsExtraViewportFromHistory
+        #else
+        fillsExtraViewportFromHistory = false
+        #endif
         cursorRenderingPolicy = view.renderOwner.cursorRenderingPolicy.withLock { $0 }
         linkHighlightRange = view.linkHighlightRange
         linkHighlightMode = view.linkHighlightMode

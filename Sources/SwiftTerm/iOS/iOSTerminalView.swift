@@ -379,6 +379,16 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     public var autoResizeGrid: Bool = true {
         didSet { synchronizeAutoResizePolicy() }
     }
+    /// When a fixed-grid view is taller than its logical screen, include older
+    /// history above that screen. Logical rows and cursor addressing stay fixed.
+    /// Alternate screens never borrow history from the normal buffer.
+    public var fillsExtraViewportFromHistory: Bool = false {
+        didSet {
+            guard oldValue != fillsExtraViewportFromHistory else { return }
+            requestFullDisplayRefresh()
+            setNeedsLayout()
+        }
+    }
     var initialGeometry: TerminalInitialGeometry?
     private var progressBarView: TerminalProgressBarView?
     private var progressReportTimer: Timer?

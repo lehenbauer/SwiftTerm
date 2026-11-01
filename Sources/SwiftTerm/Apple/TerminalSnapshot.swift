@@ -410,6 +410,19 @@ final class TerminalSnapshot {
         y = buffer.y
         cols = buffer.cols
         rowCount = buffer.rows
+        if viewState.cellDimension.height > 0,
+           let range = terminalExtraHistoryRange(
+               enabled: viewState.fillsExtraViewportFromHistory,
+               alternate: terminal.isDisplayBufferAlternate,
+               displayRow: buffer.yDisp, gridRows: buffer.rows,
+               lineCount: buffer.lines.count,
+               viewportFirstRow: Int(floor(viewState.viewBounds.minY / viewState.cellDimension.height)),
+               viewportRows: Int(ceil(viewState.viewBounds.height / viewState.cellDimension.height))
+           ) {
+            firstRow = range.lowerBound
+            yDisp = firstRow
+            rowCount = range.count
+        }
         linesCount = buffer.lines.count
         linesTop = buffer.linesTop
         totalLinesTrimmed = buffer.totalLinesTrimmed
@@ -421,7 +434,7 @@ final class TerminalSnapshot {
         style = newStyle
         ansiColors = terminal.ansiColors
 
-        let visibleCount = max(0, min(buffer.rows, buffer.lines.count - firstRow))
+        let visibleCount = max(0, min(rowCount, buffer.lines.count - firstRow))
         while rows.count > visibleCount {
             rowPool.append(rows.removeLast())
         }
@@ -550,7 +563,7 @@ final class TerminalSnapshot {
             }
             cursor = SnapshotCursor(
                 absoluteRow: absoluteCursorRow,
-                screenRow: absoluteCursorRow - buffer.yDisp,
+                screenRow: absoluteCursorRow - yDisp,
                 logicalCol: cursorCol,
                 visualCol: visualCol,
                 columnWidth: max(1, Int(cell.width)),
