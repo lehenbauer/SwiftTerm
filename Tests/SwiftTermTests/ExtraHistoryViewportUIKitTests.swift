@@ -5,6 +5,28 @@ import XCTest
 
 @MainActor
 final class ExtraHistoryViewportUIKitTests: XCTestCase {
+    func testFixedGridLayoutKeepsFollowAndHistoryPositionsWithoutNewOutput() {
+        let font = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        let cell = TerminalView.cellMetrics(font: font, backingScale: UIScreen.main.scale)
+        let view = TerminalView(frame: CGRect(x: 0, y: 0, width: cell.width * 40, height: cell.height * 40),
+            font: font, terminalOptions: .default, initialGeometry: .grid(cols: 40, rows: 20), autoResizeGrid: false)
+        view.feed(text: (1...100).map { "ROW \($0)\r\n" }.joined())
+        view.layoutIfNeeded()
+        view.scrollToBottom()
+        view.frame.size.height = cell.height * 20
+        view.layoutIfNeeded()
+        XCTAssertEqual(view.contentOffset.y, view.contentSize.height - view.bounds.height,
+                       accuracy: 0.01, "a fixed-grid layout must follow the live tail without waiting for output")
+        XCTAssertEqual(view.terminalDimensions.rows, 20)
+
+        view.userScrolling = true
+        view.contentOffset.y = cell.height * 10
+        view.frame.size.height = cell.height * 30
+        view.layoutIfNeeded()
+        XCTAssertEqual(view.contentOffset.y, cell.height * 10, accuracy: 0.01,
+                       "resizing the presentation must preserve a history reader's anchor")
+    }
+
     func testExpandedHistoryMatchesTallerTerminalWithoutChangingAddressing() async throws {
         let font = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         let cell = TerminalView.cellMetrics(font: font, backingScale: UIScreen.main.scale)

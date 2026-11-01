@@ -48,3 +48,16 @@ logical rows or sending a remote resize. Isolated feature branch; no main merge.
   screenshots do not establish physical-device Metal behavior.
 - GitNexus impact returned UNKNOWN for the changed snapshot refresh path;
   checked direct render-owner/CG/Metal consumers in source instead.
+
+## Fixed-grid layout follow-up
+
+Whisp's full keyboard-cycle driver exposed a quiet-program handoff: shrinking
+the fixed grid's frame retained the old offset until more output arrived, so
+Code keyboard hide failed its live-bottom guard. `processSizeChange` skips its
+scroller update for fixed grids. UIKit layout now updates the scroller without
+resizing the grid; it preserves manual browsing using the existing scroll owner.
+The new native regression fails before the change (offset915 vs1215) and passes
+after; both native extra-history tests pass (`follow-old.log`, `follow-fixed.log`).
+This follow-up changes only UIKit layout; prior Mac suite/benchmark results apply.
+Downstream exact-pin keyboard-cycle qualification is recorded in Whisp's
+`RETAINED-GRID-2026-11-01.md` handoff.

@@ -2480,6 +2480,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
 
         if sizeChanged {
             processSizeChange(newSize: currentBounds.size)
+            // Fixed grids skip processSizeChange's resize/scroller path. The
+            // viewport still changed: keep live-follow or the manual history
+            // anchor valid now, even if the remote program sends no output.
+            if !autoResizeGrid { updateScroller() }
             updateCursorPosition()
         }
 
