@@ -74,3 +74,5 @@
 ## 2026-06-07
 
 - For the June 2026 upstream merge, prefer resolving `Sources/SwiftTerm/SyncDebug.swift` by keeping the local no-op implementation. Upstream's added version describes a host-app opt-in trace, but `enabled` is a `static let false` on an internal enum, so it is not a usable public toggle and adds dead stderr logging machinery.
+
+- 2026-11-01: `fillsExtraViewportFromHistory` is opt-in UIKit presentation for fixed grids and normal buffers only; preserve logical rows, cursor addressing and scroll-region state. Fixed-grid frame changes must still refresh scroll geometry while respecting manual history ownership — `handoffs/2026-11-01-keyboard-viewport.md`.

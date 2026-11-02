@@ -7,9 +7,10 @@ constraints live in `decisions.md`.
 
 - Main adopts released upstream v1.99.2 (`a183c15`) through fork merge e12887a,
   echo repair060f8a4 and overlay repairs ee78a76/7e49e98. Whisp's exact pin is
-  `365bb5135272e051f3a54c9ebf300a7ba4007b91`; later changes are documentation only.
-- Qualified Sources17e363d44171c92b7c6b6047a8c36f807a6a0a20 and
-  Tests18f043fc11341a2c754560fc7a3ab344c8dd315e are unchanged for main adoption.
+  `9d5ceadcb491ef93062bea3e0c37933c5dc6f871`, adding UIKit-only extra-history
+  presentation and fixed-grid layout anchoring. Mac leaves the feature disabled.
+- Phone integration and evidence: `handoffs/2026-11-01-keyboard-viewport.md`.
+  The exact published pin is retained; the closing successor changes only docs.
 - The user accepted the live Whisp worktree build and explicitly approved main
   integration. Preserve that running worktree; no additional relaunch or release.
 - Evidence: `handoffs/2026-10-30-upstream-v1.99.2/README.md`, plus the Whisp
@@ -17,7 +18,9 @@ constraints live in `decisions.md`.
 
 ## Executed qualification
 
-- Full Mac swift build/test:2105 Swift Testing +146 XCTest pass,31 existing skips.
+- Latest full Mac swift build/test:2105 Swift Testing +150 XCTest pass,31 existing skips.
+- Exact-pin Whisp Mac/iPhone Release/Vision builds pass; native CG/Metal history
+  and keyboard-cycle proof plus physical acceptance are in the phone handoff.
 - UIKit1062+57 and Vision library build pass at060f8a4; later Mac-only delta
   permits reuse. Fourth echo wiring test separately passes on Mac/UIKit.
 - Whisp exact remote pin: Mac/iOS/Vision builds, literal vision-build-check,
